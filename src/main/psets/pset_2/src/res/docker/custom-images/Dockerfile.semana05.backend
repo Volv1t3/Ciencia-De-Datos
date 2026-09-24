@@ -1,0 +1,42 @@
+FROM python:3.12-slim
+
+ARG DBT_UI_REPOSITORY=https://github.com/EricLamphere/dbt-ui.git
+ARG DBT_UI_COMMIT=1fe89c5d023cd4d7a88642091c303a75839534f9
+ARG DBT_CORE_VERSION=1.12.5
+ARG DBT_DUCKDB_VERSION=1.11.0
+ARG DBT_SNOWFLAKE_VERSION=1.12.1
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    VIRTUAL_ENV=/opt/dbt-ui/backend/.venv \
+    PATH=/opt/dbt-ui/backend/.venv/bin:${PATH} \
+    HOME=/home/dbtui
+
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends bash ca-certificates git openssh-client zsh \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN git clone "${DBT_UI_REPOSITORY}" /opt/dbt-ui \
+    && git -C /opt/dbt-ui checkout --detach "${DBT_UI_COMMIT}"
+
+# dbt-ui always invokes /opt/dbt-ui/backend/.venv/bin/dbt as a subprocess.
+# DuckDB supports local runs; Snowflake supports externally managed warehouses.
+RUN python -m venv "${VIRTUAL_ENV}" \
+    && "${VIRTUAL_ENV}/bin/pip" install --no-cache-dir --upgrade pip setuptools wheel \
+    && "${VIRTUAL_ENV}/bin/pip" install --no-cache-dir \
+       --editable /opt/dbt-ui/backend \
+       "dbt-core==${DBT_CORE_VERSION}" \
+       "dbt-duckdb==${DBT_DUCKDB_VERSION}" \
+       "dbt-snowflake==${DBT_SNOWFLAKE_VERSION}"
+
+RUN useradd --create-home --uid 1000 --shell /bin/bash dbtui \
+    && mkdir -p /var/lib/dbt-ui /workspace/dbt-projects /workspace/dbt-data /home/dbtui/.dbt \
+    && chown -R dbtui:dbtui /opt/dbt-ui /var/lib/dbt-ui /workspace /home/dbtui
+
+USER dbtui
+WORKDIR /opt/dbt-ui
+
+EXPOSE 8001
+
+CMD ["/opt/dbt-ui/backend/.venv/bin/uvicorn", "app.main:app", "--app-dir", "/opt/dbt-ui/backend", "--host", "0.0.0.0", "--port", "8001"]

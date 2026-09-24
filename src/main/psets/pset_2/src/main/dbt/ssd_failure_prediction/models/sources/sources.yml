@@ -1,0 +1,7 @@
+version: 2
+
+sources:
+  - name: bronze
+    description: Raw Alibaba SMART telemetry loaded by Kestra. Table columns remain TBD until the archives are inspected.
+    database: "{{ env_var('SNOWFLAKE_DATABASE') }}"
+    schema: BRONZE

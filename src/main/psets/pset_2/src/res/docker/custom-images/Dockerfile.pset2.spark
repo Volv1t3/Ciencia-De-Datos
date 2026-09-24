@@ -1,0 +1,23 @@
+FROM apache/spark:4.0.4-scala2.13-java21-python3-r-ubuntu
+
+USER root
+
+# Spark 4.0.4 uses Scala 2.13. These are matching, pinned connector JARs.
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && curl --fail --location --silent --show-error \
+      --output /opt/spark/jars/spark-snowflake_2.13-3.2.2-spark_4.0.jar \
+      https://repo1.maven.org/maven2/net/snowflake/spark-snowflake_2.13/3.2.2-spark_4.0/spark-snowflake_2.13-3.2.2-spark_4.0.jar \
+    && curl --fail --location --silent --show-error \
+      --output /opt/spark/jars/snowflake-jdbc-4.0.2.jar \
+      https://repo1.maven.org/maven2/net/snowflake/snowflake-jdbc/4.0.2/snowflake-jdbc-4.0.2.jar
+
+COPY config/spark/requirements.txt /tmp/requirements.txt
+RUN python3 -m pip install --no-cache-dir -r /tmp/requirements.txt \
+    && rm /tmp/requirements.txt \
+    && mkdir -p /opt/spark/work /opt/spark/logs \
+    && chown -R spark:spark /opt/spark/work /opt/spark/logs
+
+USER spark
+WORKDIR /opt/spark/work

@@ -1,0 +1,2 @@
+# Add job-runtime Python libraries here when the OBT implementation needs them.
+# PySpark itself is supplied by the pinned Apache Spark 4.0.4 image.

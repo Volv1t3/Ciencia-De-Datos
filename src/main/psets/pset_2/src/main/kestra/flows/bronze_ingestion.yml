@@ -1,0 +1,29 @@
+id: bronze_ingestion
+namespace: ssd_failure_prediction
+description: >-
+  DAG skeleton for replayable Bronze ingestion. Dataset-specific extraction and
+  Snowflake loading remain TODO until the Tianchi archives have been inspected.
+
+inputs:
+  - id: requested_start_date
+    type: STRING
+    required: false
+  - id: requested_end_date
+    type: STRING
+    required: false
+
+tasks:
+  - id: validate_required_archives
+    type: io.kestra.plugin.scripts.shell.Commands
+    commands:
+      - test -r /usr/data/landing/smartlog2018ssd.zip
+      - test -r /usr/data/landing/smartlog2019ssd.zip
+      - test -r /usr/data/landing/ssd_failure_label.csv.zip
+
+  - id: record_ingestion_contract
+    type: io.kestra.plugin.core.log.Log
+    message: >-
+      TODO: extract archives to execution-local storage; discover yyyymmdd.csv
+      files; select the requested date range; stage and COPY to Snowflake; then
+      validate the load. Finalize a date+disk idempotency key or MERGE policy
+      only after inspecting the source schema.

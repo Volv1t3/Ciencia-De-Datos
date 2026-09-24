@@ -1,0 +1,18 @@
+name: ssd_failure_prediction
+version: "1.0.0"
+config-version: 2
+profile: ssd_failure_prediction
+
+model-paths: ["models"]
+macro-paths: ["macros"]
+test-paths: ["tests"]
+clean-targets: ["target", "dbt_packages"]
+
+models:
+  ssd_failure_prediction:
+    silver:
+      +materialized: view
+      +schema: SILVER
+    gold:
+      +materialized: view
+      +schema: GOLD

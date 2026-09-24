@@ -1,0 +1,23 @@
+datasources:
+  postgres:
+    url: jdbc:postgresql://${ENV_KESTRA_DATABASE_HOST}:${ENV_KESTRA_DATABASE_PORT}/${ENV_KESTRA_DATABASE}
+    driver-class-name: org.postgresql.Driver
+    username: ${ENV_KESTRA_USERNAME:kestra}
+    password: ${ENV_KESTRA_PASSWORD:kestra}
+
+kestra:
+  server:
+    basic-auth:
+      enabled: false
+  repository:
+    type: postgres
+  queue:
+    type: postgres
+  storage:
+    type: local
+    local:
+      base-path: /app/storage
+  tasks:
+    tmp-dir:
+      path: /tmp/kestra-wd/tmp
+  url: http://localhost:8080/

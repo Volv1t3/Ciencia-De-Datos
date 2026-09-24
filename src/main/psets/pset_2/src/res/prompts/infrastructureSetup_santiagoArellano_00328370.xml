@@ -1,0 +1,1227 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<infrastructure_generation_prompt>
+
+  <role>
+    You are a senior data-platform and DevOps engineer.
+    Your task is to implement the complete LOCAL INFRASTRUCTURE LAYER
+    for a university Data Mining project involving SSD failure prediction.
+
+    Generate actual working configuration files, Dockerfiles, initialization
+    scripts, directory structure, documentation, and minimal validation commands.
+
+    Do not implement the machine-learning model yet.
+    Do not implement Airflow.
+    Do not introduce Kubernetes.
+    Do not introduce unnecessary infrastructure.
+  </role>
+
+  <project_context>
+    <name>SSD Failure Prediction Data Pipeline</name>
+
+    <purpose>
+      Build a reproducible batch ELT data platform for the Alibaba DCBrain
+      SMART SSD telemetry dataset.
+
+      The complete later pipeline will follow:
+
+      Source
+      -> Kestra
+      -> Snowflake Bronze
+      -> dbt Silver
+      -> dbt Gold
+      -> Apache Spark / PySpark
+      -> Snowflake OBT
+
+      This task concerns the infrastructure required to support that pipeline,
+      together with enough skeleton configuration to validate every component.
+    </purpose>
+
+    <dataset>
+      <source>Alibaba DCBrain / Tianchi SSD SMART Logs</source>
+
+      <local_acquisition>
+        Dataset acquisition from Tianchi requires authenticated user interaction.
+        Therefore source acquisition is outside the automated pipeline.
+
+        The user manually downloads the original immutable archives once and
+        places them in the local landing directory.
+
+        Kestra automation begins from that local landing directory.
+      </local_acquisition>
+
+      <expected_archives>
+        <file>smartlog2018ssd.zip</file>
+        <file>smartlog2019ssd.zip</file>
+        <file>ssd_failure_label.csv.zip</file>
+      </expected_archives>
+
+      <expected_smart_data>
+        Daily files are named approximately yyyymmdd.csv.
+        SMART rows contain disk_id, ds, model, and SMART n_i / r_i fields.
+      </expected_smart_data>
+    </dataset>
+
+    <host_environment>
+      The environment should be suitable for local Docker Compose development.
+
+      Prefer images and dependencies that work on ARM64 / Apple Silicon as well
+      as AMD64 whenever practical.
+
+      Avoid architecture-specific assumptions unless unavoidable.
+    </host_environment>
+  </project_context>
+
+
+  <primary_objectives>
+
+    <objective id="1">
+      Provide one docker-compose.yml capable of starting all required local
+      infrastructure.
+    </objective>
+
+    <objective id="2">
+      Run Kestra locally as the ONLY workflow orchestrator.
+    </objective>
+
+    <objective id="3">
+      Run PostgreSQL exclusively as Kestra's metadata and persistence database.
+    </objective>
+
+    <objective id="4">
+      Mount the immutable source-data directory into Kestra at:
+
+      /usr/data/landing
+
+      The landing directory should preferably be mounted read-only. The mounting must be done from the locally
+        accessible directory 'src/res/data/raw' onto the aforedmentioned directory.
+    </objective>
+
+    <objective id="5">
+      Containerize the open-source project:
+
+      https://github.com/EricLamphere/dbt-ui
+
+      Build a custom local dbt-ui image containing:
+      - its frontend
+      - its backend
+      - dbt Core
+      - dbt-snowflake
+
+      The implementation for this has already been provided at the 'src/res/docker/custom-images' directory containing
+        a single image definition for backend and frontend The images are based on the aforedmentioned repository and
+      describe their implementation requirements and environment variables.
+    </objective>
+
+    <objective id="6">
+      Create a custom Apache Spark / PySpark Docker image containing:
+      - Java
+      - Python
+      - PySpark
+      - Apache Spark runtime
+      - Snowflake Spark connector
+      - Snowflake JDBC driver
+
+      Spark must initially operate in local mode.
+
+      Do NOT create an artificial multi-worker Spark cluster unless technically
+      necessary.
+    </objective>
+
+    <objective id="7">
+      Keep Snowflake external to Docker Compose.
+
+      Local services connect to the user's existing Snowflake account using
+      environment variables.
+    </objective>
+
+    <objective id="8">
+      Never commit real passwords, private keys, account identifiers, tokens,
+      or secrets.
+    </objective>
+
+  </primary_objectives>
+
+
+  <required_repository_structure>
+
+    Generate approximately the following structure.
+
+    Preserve separation between infrastructure configuration, application code,
+    local source data, and warehouse initialization.
+
+    <![CDATA[
+.
+├── docker-compose.yml
+├── .env.example
+├── .gitignore
+├── README.md
+│
+├── data/
+│   ├── landing/
+│   │   └── .gitkeep
+│   └── README.md
+│
+├── kestra/
+│   ├── config/
+│   │   └── application.yml
+│   └── flows/
+│       ├── README.md
+│       └── bronze_ingestion.yml
+│
+├── dbt-ui/
+│   └── Dockerfile
+│
+├── dbt/
+│   ├── dbt_project.yml
+│   ├── packages.yml
+│   │
+│   ├── profiles/
+│   │   └── profiles.yml
+│   │
+│   ├── models/
+│   │   ├── sources/
+│   │   │   └── sources.yml
+│   │   ├── silver/
+│   │   │   └── .gitkeep
+│   │   └── gold/
+│   │       └── .gitkeep
+│   │
+│   ├── macros/
+│   │   └── .gitkeep
+│   │
+│   ├── tests/
+│   │   └── .gitkeep
+│   │
+│   └── workspace/
+│       └── .gitkeep
+│
+├── spark/
+│   ├── Dockerfile
+│   ├── requirements.txt
+│   │
+│   ├── conf/
+│   │   ├── spark-defaults.conf
+│   │   └── log4j2.properties
+│   │
+│   └── jobs/
+│       ├── README.md
+│       └── build_obt.py
+│
+└── snowflake/
+    └── bootstrap/
+        ├── 001_database_and_schemas.sql
+        ├── 002_file_formats.sql
+        └── 003_stages.sql
+    ]]>
+
+    Do not place the Alibaba dataset archives in Git.
+
+    The previous model shall be adpated to the current directory structure that contains the corresponding files for
+    the already provided custom images, as well as the location for configuration files and centralized data storage
+    that should not be added to git. The corresponding files for the dbt-projects, among other requirements should be
+    defined underneath the tree 'src/main/...' depending on the system they refer to. The corresponding projects for
+    DBT should be configured underneath a single folder named dbt with an underlying dbt-projects folder.
+
+    <![CDATA[
+    └── src
+    ├── main
+    │   └── python
+    └── res
+        ├── config
+        │   ├── dbt
+        │   └── kestra
+        ├── data
+        │   └── raw
+        ├── docker
+        │   └── custom-images
+        │       ├── Dockerfile.semana05.backend
+        │       └── Dockerfile.semana05.frontend
+        └── prompts
+            └── infrastructureSetup_santiagoArellano_00328370.xml
+]]>
+
+  </required_repository_structure>
+
+
+  <docker_compose>
+
+    <project_name>ciencia-de-datos-ssd-failure-pipeline-pset-2</project_name>
+
+    <networking>
+      Create one internal Docker bridge network:
+
+      ciencia-de-datos-data-platform-pset-2
+
+      All local services should communicate through Docker DNS using service
+      names rather than hard-coded IP addresses.
+    </networking>
+
+    <services>
+
+
+      <service name="kestra-postgres">
+
+        <purpose>
+          Persistent PostgreSQL database used only for Kestra internal state,
+          metadata, workflow definitions, executions, queues, and related
+          orchestration persistence.
+        </purpose>
+
+        <image>
+          Use a current stable PostgreSQL image and pin the major version.
+        </image>
+
+        <environment>
+          Read database name, username, and password from environment variables.
+
+          Provide safe local-development defaults only in .env.example where
+          appropriate.
+        </environment>
+
+        <volume>
+          Use a named Docker volume:
+
+          kestra_postgres_data:/var/lib/postgresql/data
+        </volume>
+
+        <healthcheck>
+          Implement pg_isready-based health checking.
+        </healthcheck>
+
+        <ports>
+          Publishing PostgreSQL to the host is optional.
+
+          If published, use a configurable host port rather than assuming that
+          port 5432 is available.
+        </ports>
+
+      </service>
+
+
+      <service name="kestra">
+
+        <purpose>
+          Sole orchestration engine.
+
+          Responsibilities later include:
+          - reading local landing files
+          - archive extraction
+          - historical backfill
+          - retries
+          - Snowflake stage uploads
+          - Bronze loading
+          - dbt orchestration
+          - Spark job orchestration if desired
+        </purpose>
+
+        <image>
+          Use the official Kestra Docker image with a pinned version.
+        </image>
+
+        <depends_on>
+          Wait for kestra-postgres to become healthy before starting.
+        </depends_on>
+
+        <configuration>
+          Mount:
+
+          ./kestra/config/application.yml
+          -> /etc/kestra/application.yml
+          read-only
+
+          Configure Kestra to use PostgreSQL rather than an embedded database.
+
+          Configure whatever queue/repository/storage settings are required by
+          the selected current Kestra version.
+
+          Do not silently depend on deprecated Kestra configuration syntax.
+          Verify configuration keys against the chosen Kestra version.
+        </configuration>
+
+        <source_mount>
+          Mount:
+
+          ./data/landing
+          -> /usr/data/landing
+          read-only
+
+          Kestra must be able to see:
+
+          /usr/data/landing/smartlog2018ssd.zip
+          /usr/data/landing/smartlog2019ssd.zip
+          /usr/data/landing/ssd_failure_label.csv.zip
+        </source_mount>
+
+        <flow_mount>
+          Mount:
+
+          ./kestra/flows
+          -> /workspace/kestra/flows
+
+          Keep workflow definitions source-controlled on the host.
+
+          If Kestra does not automatically import filesystem flow YAML files,
+          document the correct CLI/API/import procedure instead of pretending
+          that the mount automatically registers them.
+        </flow_mount>
+
+        <ports>
+          Expose the Kestra web UI on a configurable host port.
+          Prefer localhost:8080 unless that conflicts with the selected image.
+        </ports>
+
+        <snowflake_credentials>
+          Pass Snowflake connection information through environment variables.
+
+          Never hard-code credentials into workflow YAML.
+        </snowflake_credentials>
+
+        <healthcheck>
+          Add a meaningful HTTP health check if supported by the selected
+          Kestra release.
+        </healthcheck>
+
+      </service>
+
+
+      <service name="dbt-ui">
+
+        <purpose>
+          Local graphical development environment for dbt Core.
+
+          It must support:
+          - editing dbt SQL and YAML
+          - dbt debug
+          - dbt compile
+          - dbt run
+          - dbt build
+          - dbt test
+          - viewing dbt DAGs
+          - connecting to Snowflake using dbt-snowflake
+        </purpose>
+
+        <build>
+          Create:
+
+          ./dbt-ui/Dockerfile
+
+          Build the application from:
+
+          https://github.com/EricLamphere/dbt-ui
+
+          Do not assume upstream provides a production Docker image.
+
+          Pin the upstream repository to a known commit or release rather than
+          relying indefinitely on an unpinned main branch.
+
+          Make the selected upstream reference configurable with a Docker build
+          ARG where practical.
+        </build>
+
+        <frontend_build>
+          Use an appropriate Node 20+ build stage.
+
+          Install frontend dependencies.
+
+          Compile the Vite frontend into frontend/dist.
+
+          Preserve the exact lockfile behavior supported by upstream.
+        </frontend_build>
+
+        <backend_build>
+          Use Python 3.11+.
+
+          Install the dbt-ui backend and its dependencies.
+
+          Install into the SAME backend virtual environment used by dbt-ui:
+
+          dbt-core
+          dbt-snowflake
+
+          This is important because dbt-ui invokes dbt as a subprocess from its
+          backend environment.
+        </backend_build>
+
+        <runtime>
+          Run the FastAPI application using uvicorn.
+
+          The container runtime must listen on:
+
+          0.0.0.0
+
+          not merely 127.0.0.1.
+
+          Configure DBT_UI_FRONTEND_DIST to point at the compiled frontend
+          directory so the FastAPI application can serve the SPA.
+
+          Avoid running the Vite development server in the final runtime image
+          unless upstream architecture makes that mandatory.
+        </runtime>
+
+        <project_mount>
+          Mount:
+
+          ./dbt
+          -> /workspace/dbt
+
+          read-write
+
+          Set:
+
+          DBT_UI_PROJECTS_PATH=/workspace
+        </project_mount>
+
+        <profiles_mount>
+          Either mount:
+
+          ./dbt/profiles/profiles.yml
+          -> /root/.dbt/profiles.yml
+
+          or configure DBT_PROFILES_DIR appropriately.
+
+          profiles.yml MUST reference environment variables via dbt env_var()
+          expressions.
+
+          It must not contain real credentials.
+        </profiles_mount>
+
+        <persistent_ui_data>
+          Persist dbt-ui SQLite/configuration state using a named volume or
+          clearly defined host directory.
+
+          Example internal path:
+
+          /var/lib/dbt-ui
+
+          Configure DBT_UI_DATA_DIR accordingly.
+        </persistent_ui_data>
+
+        <ports>
+          Make the browser UI available on localhost.
+
+          Prefer host port 5173 for familiarity, even if it maps internally to
+          the FastAPI port.
+        </ports>
+
+        <healthcheck>
+          Use the application's HTTP health endpoint where available.
+        </healthcheck>
+
+      </service>
+
+
+      <service name="spark">
+
+        <purpose>
+          Local Apache Spark environment used to create the future One Big Table
+          from Snowflake Gold tables and write that OBT back to Snowflake.
+        </purpose>
+
+        <build>
+          Create:
+
+          ./spark/Dockerfile
+
+          Build a custom image.
+
+          The resulting image MUST contain:
+
+          - a supported Java runtime
+          - Python 3
+          - Apache Spark
+          - matching PySpark version
+          - Snowflake JDBC driver
+          - Snowflake Spark connector
+          - any Python dependencies in requirements.txt
+        </build>
+
+        <version_compatibility>
+          Pin all versions.
+
+          Verify compatibility between:
+
+          Apache Spark version
+          Java version
+          Scala binary version
+          PySpark version
+          Snowflake Spark Connector artifact
+          Snowflake JDBC driver
+
+          Never choose versions independently.
+
+          The Spark runtime and installed PySpark package MUST refer to the same
+          Spark version.
+
+          The Snowflake Spark connector's Scala suffix MUST match the Scala
+          binary version used by the chosen Spark distribution.
+        </version_compatibility>
+
+        <execution_mode>
+          Configure Spark initially using:
+
+          local[*]
+
+          This project does not require a fake distributed master/worker
+          deployment.
+
+          A single container executing genuine Spark in local mode is preferred.
+        </execution_mode>
+
+        <python>
+          Set PYSPARK_PYTHON appropriately.
+
+          Python jobs must be executable using:
+
+          spark-submit /opt/spark/jobs/build_obt.py
+        </python>
+
+        <job_mount>
+          Mount:
+
+          ./spark/jobs
+          -> /opt/spark/jobs
+
+          read-write or read-only as appropriate.
+        </job_mount>
+
+        <configuration_mount>
+          Mount:
+
+          ./spark/conf/spark-defaults.conf
+          -> the Spark installation's spark-defaults.conf
+
+          ./spark/conf/log4j2.properties
+          -> the Spark installation's log4j2.properties
+        </configuration_mount>
+
+        <working_directory>
+          Use a deterministic working directory such as:
+
+          /opt/spark/work
+        </working_directory>
+
+        <container_lifecycle>
+          Keep the development Spark container available for docker compose exec
+          and Kestra-triggered spark-submit calls.
+
+          Do not create an endless high-CPU process merely to keep it alive.
+
+          A lightweight idle command is acceptable for local development.
+        </container_lifecycle>
+
+        <snowflake>
+          Pass Snowflake configuration through environment variables.
+
+          Do not embed credentials in build_obt.py.
+
+          build_obt.py should initially be a harmless connectivity/skeleton job
+          rather than the completed OBT implementation.
+        </snowflake>
+
+        <validation_job>
+          The skeleton build_obt.py should:
+
+          1. create a SparkSession;
+          2. print Spark and Python runtime information;
+          3. confirm local[*] execution;
+          4. optionally validate Snowflake connector availability without
+             modifying production tables;
+          5. exit cleanly.
+        </validation_job>
+
+      </service>
+
+    </services>
+
+
+    <volumes>
+      Define named Docker volumes at minimum for:
+
+      kestra_postgres_data
+      dbt_ui_data
+
+      Do not put the immutable Alibaba source data into an opaque Docker volume.
+      Keep it as a visible host bind mount under ./data/landing.
+    </volumes>
+
+  </docker_compose>
+
+
+  <snowflake_configuration>
+
+    <principle>
+      Snowflake is REMOTE infrastructure and must not be represented as a Docker
+      service.
+    </principle>
+
+    <expected_environment_variables>
+      Include placeholders in .env.example for values similar to:
+
+      SNOWFLAKE_ACCOUNT
+      SNOWFLAKE_USER
+      SNOWFLAKE_PASSWORD
+      SNOWFLAKE_ROLE
+      SNOWFLAKE_WAREHOUSE
+      SNOWFLAKE_DATABASE
+      SNOWFLAKE_SCHEMA
+
+      If key-pair authentication is implemented, provide appropriately named
+      private-key variables instead of committing key material.
+    </expected_environment_variables>
+
+    <logical_database_layout>
+      Prepare bootstrap SQL capable of establishing the project's logical layers:
+
+      BRONZE
+      SILVER
+      GOLD
+      OBT
+
+      These may be schemas in one project database.
+
+      Prefer one project database unless there is a strong technical reason to
+      create separate databases.
+    </logical_database_layout>
+
+    <bootstrap_files>
+
+      <file name="001_database_and_schemas.sql">
+        Create the project database if permitted.
+        Create BRONZE, SILVER, GOLD, and OBT schemas.
+        Use idempotent Snowflake DDL where practical.
+      </file>
+
+      <file name="002_file_formats.sql">
+        Define the CSV file format required by the Alibaba SMART dataset.
+
+        Do not make undocumented assumptions about header handling or null
+        encoding without inspecting actual source files.
+      </file>
+
+      <file name="003_stages.sql">
+        Create one or more internal stages required for Bronze ingestion.
+      </file>
+
+    </bootstrap_files>
+
+  </snowflake_configuration>
+
+
+  <dbt_configuration>
+
+    <adapter>
+      Use dbt-snowflake.
+    </adapter>
+
+    <profiles>
+      Generate profiles.yml using env_var() for every environment-specific or
+      secret value.
+
+      Example logical target:
+
+      dev
+    </profiles>
+
+    <project>
+      Create a valid dbt_project.yml.
+
+      Establish model directory conventions for:
+
+      models/sources
+      models/silver
+      models/gold
+    </project>
+
+    <sources>
+      Create a preliminary sources.yml for the expected Bronze Snowflake schema.
+
+      Do not invent finalized Bronze table column definitions before the actual
+      Alibaba files have been inspected.
+    </sources>
+
+    <packages>
+      Keep packages.yml minimal.
+
+      Do not introduce dbt packages unless they are currently required.
+    </packages>
+
+    <scope_boundary>
+      Do NOT yet implement:
+      - target construction
+      - rolling 7/14/30 day features
+      - censoring logic
+      - ML features
+      - model training
+      - final dimensional schema
+
+      This infrastructure task should only prove that dbt can connect,
+      compile, execute, and test against Snowflake.
+    </scope_boundary>
+
+  </dbt_configuration>
+
+
+  <kestra_configuration>
+
+    <application_yml>
+      Generate a valid Kestra configuration file compatible with the chosen
+      pinned Kestra version.
+
+      Configure:
+      - PostgreSQL repository/storage requirements
+      - server mode
+      - local internal storage where required
+      - plugin configuration if required
+      - environment-variable based secrets
+    </application_yml>
+
+    <bronze_ingestion_flow>
+      Create a SKELETON flow named bronze_ingestion.yml.
+
+      It should establish the intended structure for:
+
+      1. checking the landing directory;
+      2. validating required archives exist;
+      3. extraction;
+      4. discovering daily CSV files;
+      5. processing a requested date/range;
+      6. retries;
+      7. Snowflake staging;
+      8. COPY INTO Bronze;
+      9. basic post-load validation.
+
+      However, if the exact Alibaba source schema has not yet been inspected,
+      do not fake the complete production COPY statement.
+
+      Clearly mark any remaining dataset-specific fields as TODO.
+    </bronze_ingestion_flow>
+
+    <historical_backfill>
+      Design the flow so that historical ranges can eventually be supplied as
+      parameters.
+
+      The daily filename/date relationship should allow replaying selected
+      periods without manually copying individual CSV files.
+    </historical_backfill>
+
+    <idempotency>
+      Design ingestion so rerunning a successful date does not silently create
+      duplicate Bronze data.
+
+      The exact strategy may be finalized after source inspection, but document
+      the intended mechanism.
+    </idempotency>
+
+  </kestra_configuration>
+
+
+  <spark_configuration>
+
+    <spark_defaults>
+      Configure sensible local-development settings only.
+
+      Set the master to local[*] or pass it explicitly.
+
+      Do not allocate unrealistic amounts of RAM.
+
+      Make memory settings configurable using environment variables where useful.
+    </spark_defaults>
+
+    <logging>
+      Reduce unnecessary Spark console noise while preserving warnings and errors.
+    </logging>
+
+    <snowflake_connector>
+      Install the connector and JDBC driver into the image rather than requiring
+      them to be manually copied after container startup.
+
+      Validate that the connector class can be discovered at runtime.
+    </snowflake_connector>
+
+    <future_job_contract>
+      Document that the eventual Spark job will:
+
+      Snowflake GOLD
+      -> Spark DataFrames
+      -> joins and OBT validation
+      -> Snowflake OBT
+
+      The current task should not build the complete OBT yet.
+    </future_job_contract>
+
+  </spark_configuration>
+
+
+  <environment_file>
+
+    Generate .env.example.
+
+    Include all configurable ports and credentials.
+
+    Suggested categories:
+
+    <![CDATA[
+# PostgreSQL / Kestra
+KESTRA_POSTGRES_DB=
+KESTRA_POSTGRES_USER=
+KESTRA_POSTGRES_PASSWORD=
+KESTRA_PORT=
+
+# dbt UI
+DBT_UI_PORT=
+DBT_UI_REF=
+
+# Spark
+SPARK_DRIVER_MEMORY=
+SPARK_EXECUTOR_MEMORY=
+
+# Snowflake
+SNOWFLAKE_ACCOUNT=
+SNOWFLAKE_USER=
+SNOWFLAKE_PASSWORD=
+SNOWFLAKE_ROLE=
+SNOWFLAKE_WAREHOUSE=
+SNOWFLAKE_DATABASE=
+SNOWFLAKE_SCHEMA=
+    ]]>
+
+    Actual .env must be gitignored.
+
+  </environment_file>
+
+
+  <gitignore>
+
+    Ensure .gitignore excludes at minimum:
+
+    <![CDATA[
+.env
+data/landing/*
+!data/landing/.gitkeep
+
+dbt/target/
+dbt/logs/
+dbt_packages/
+
+*.pem
+*.p8
+*.key
+
+__pycache__/
+*.pyc
+
+.DS_Store
+    ]]>
+
+    Preserve source-controlled configuration files.
+  </gitignore>
+
+
+  <security_requirements>
+
+    <requirement>
+      No credentials inside docker-compose.yml.
+    </requirement>
+
+    <requirement>
+      No credentials inside profiles.yml.
+    </requirement>
+
+    <requirement>
+      No credentials inside Kestra workflow source.
+    </requirement>
+
+    <requirement>
+      No credentials inside Python Spark jobs.
+    </requirement>
+
+    <requirement>
+      No private key material committed to the repository.
+    </requirement>
+
+    <requirement>
+      Prefer environment variables or Docker secrets where appropriate.
+    </requirement>
+
+  </security_requirements>
+
+
+  <startup_sequence>
+
+    docker compose up should result in the logical order:
+
+    1. kestra-postgres starts
+    2. kestra-postgres becomes healthy
+    3. Kestra starts
+    4. dbt-ui starts independently
+    5. Spark development container starts independently
+
+    Do not make dbt-ui or Spark depend on PostgreSQL.
+
+    Do not make local services depend on Snowflake being reachable merely to
+    start their processes.
+
+  </startup_sequence>
+
+
+  <health_and_validation>
+
+    Provide documented commands to validate the stack.
+
+    The validation procedure should prove:
+
+    <![CDATA[
+docker compose config
+
+docker compose build
+
+docker compose up -d
+
+docker compose ps
+    ]]>
+
+    Then validate individually:
+
+    Kestra:
+    - UI responds
+    - PostgreSQL connection works
+    - /usr/data/landing is visible
+
+    dbt-ui:
+    - UI responds
+    - mounted dbt project is discovered
+    - dbt --version works
+    - dbt-snowflake is installed
+    - dbt debug can connect when valid credentials are supplied
+
+    Spark:
+    - java -version works
+    - python --version works
+    - pyspark --version or spark-submit --version works
+    - PySpark SparkSession can start
+    - Spark runs in local mode
+    - Snowflake Spark connector JAR is present/discoverable
+
+    PostgreSQL:
+    - health check becomes healthy
+    - persistent volume survives restart
+  </health_and_validation>
+
+
+  <readme_requirements>
+
+    Generate a README.md that is operational rather than theoretical.
+
+    It must explain:
+
+    1. architecture;
+    2. prerequisites;
+    3. repository directory structure;
+    4. copying .env.example to .env;
+    5. where Tianchi archives must be placed;
+    6. building containers;
+    7. starting the stack;
+    8. accessing Kestra;
+    9. accessing dbt-ui;
+    10. testing dbt connectivity;
+    11. entering the Spark container;
+    12. running spark-submit;
+    13. stopping the stack;
+    14. difference between docker compose down and down -v;
+    15. Snowflake bootstrap procedure;
+    16. security warning about secrets;
+    17. troubleshooting ARM64 / Apple Silicon issues if any selected dependency
+        requires special handling.
+
+    Include the architecture:
+
+    <![CDATA[
+Alibaba Tianchi
+      |
+      | manual authenticated acquisition
+      v
+./data/landing
+      |
+      | read-only bind mount
+      v
+    Kestra --------------------+
+      |                        |
+      |                        | orchestration
+      v                        |
+ Snowflake BRONZE              |
+      |                        |
+      v                        |
+ dbt-ui / dbt Core <-----------+
+      |
+      | SQL executed by Snowflake
+      v
+ Snowflake SILVER
+      |
+      v
+ Snowflake GOLD
+      |
+      v
+ Spark / PySpark
+      |
+      v
+ Snowflake OBT
+    ]]>
+
+  </readme_requirements>
+
+
+  <implementation_principles>
+
+    <principle>
+      Prefer boring, explicit, reproducible configuration over clever
+      abstractions.
+    </principle>
+
+    <principle>
+      Pin important image and dependency versions.
+    </principle>
+
+    <principle>
+      Do not use "latest" for production-relevant dependencies.
+    </principle>
+
+    <principle>
+      Do not create services merely because they are common in data-engineering
+      tutorials.
+    </principle>
+
+    <principle>
+      PostgreSQL belongs to Kestra infrastructure only.
+    </principle>
+
+    <principle>
+      Snowflake remains the analytical warehouse and compute engine for dbt.
+    </principle>
+
+    <principle>
+      Spark is used because the assignment explicitly requires construction of
+      the OBT with Spark.
+    </principle>
+
+    <principle>
+      Kestra is the only scheduler/orchestrator.
+    </principle>
+
+    <principle>
+      Source files are immutable.
+    </principle>
+
+    <principle>
+      Bronze should eventually preserve raw source information rather than
+      prematurely filtering to MC1.
+    </principle>
+
+  </implementation_principles>
+
+
+  <non_goals>
+
+    Do NOT implement:
+
+    - Airflow
+    - Kafka
+    - Flink
+    - Kubernetes
+    - MinIO unless technically proven necessary
+    - a Spark multi-node cluster
+    - machine-learning training
+    - XGBoost
+    - feature engineering
+    - 30-day target generation
+    - censoring rules
+    - production deployment
+    - streaming ingestion
+    - automatic Tianchi authentication/download
+
+  </non_goals>
+
+
+  <acceptance_criteria>
+
+    The task is complete only when:
+
+    1. docker compose config succeeds;
+
+    2. all custom images build successfully;
+
+    3. docker compose up starts:
+       - PostgreSQL
+       - Kestra
+       - dbt-ui
+       - Spark;
+
+    4. Kestra persists state in PostgreSQL;
+
+    5. Kestra can see /usr/data/landing;
+
+    6. dbt-ui can see the host-mounted dbt project;
+
+    7. dbt Core and dbt-snowflake work inside dbt-ui;
+
+    8. Spark can execute a Python file using spark-submit;
+
+    9. Spark can create a local PySpark SparkSession;
+
+    10. Snowflake credentials are externalized;
+
+    11. the repository contains no real secrets;
+
+    12. all important directories and mounts are documented;
+
+    13. restart does not erase Kestra PostgreSQL state or dbt-ui state;
+
+    14. deleting Docker volumes is explicitly documented as destructive;
+
+    15. no Airflow service or Airflow dependency exists.
+
+  </acceptance_criteria>
+
+
+  <final_output>
+
+    Produce:
+
+    - complete directory tree;
+    - docker-compose.yml;
+    - .env.example;
+    - .gitignore;
+    - kestra/config/application.yml;
+    - kestra/flows/bronze_ingestion.yml;
+    - dbt-ui/Dockerfile;
+    - dbt/dbt_project.yml;
+    - dbt/profiles/profiles.yml;
+    - dbt/models/sources/sources.yml;
+    - spark/Dockerfile;
+    - spark/requirements.txt;
+    - spark/conf/spark-defaults.conf;
+    - spark/conf/log4j2.properties;
+    - spark/jobs/build_obt.py;
+    - Snowflake bootstrap SQL files;
+    - README.md.
+
+    Before finishing, inspect every generated file for mismatched:
+    - ports
+    - paths
+    - environment variable names
+    - container mount locations
+    - database names
+    - Spark versions
+    - Java versions
+    - Scala versions
+    - connector versions.
+
+    Do not return pseudo-code where a working configuration can reasonably be
+    produced.
+
+    When a current third-party version or configuration syntax must be selected,
+    verify it against the corresponding upstream documentation before generating
+    the final file.
+
+  </final_output>
+
+</infrastructure_generation_prompt>

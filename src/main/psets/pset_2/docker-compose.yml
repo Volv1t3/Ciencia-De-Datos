@@ -1,0 +1,163 @@
+name: ciencia-de-datos-ssd-failure-pipeline-pset-2
+
+services:
+  kestra-postgres:
+    image: postgres:17-alpine
+    environment:
+      #?  Esta estructura de mensajes permite que si no se encuentra la variable de entorno, se muestre un
+      #? mensaje de error indicando que debe ser configurada en el archivo .env. Este archivo se lee desde otro
+      #? directorio proveido durante la ejecucion del compose
+      POSTGRES_DB: ${KESTRA_POSTGRES_DB:?set KESTRA_POSTGRES_DB in .env}
+      POSTGRES_USER: ${KESTRA_POSTGRES_USER:?set KESTRA_POSTGRES_USER in .env}
+      POSTGRES_PASSWORD: ${KESTRA_POSTGRES_PASSWORD:?set KESTRA_POSTGRES_PASSWORD in .env}
+    ports:
+      - "${KESTRA_POSTGRES_HOST_PORT}:5432"
+    volumes:
+      - kestra_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+    networks:
+      - data-platform
+
+  kestra:
+    image: kestra/kestra:v1.3.38
+    user: root
+    command: ["server", "standalone", "--config", "/etc/kestra/application.yml"]
+    environment:
+      #? Determinan la URL para la string de conexion JDBC para la base de management de Kestra
+      ENV_KESTRA_DATABASE_HOST: kestra-postgres
+      ENV_KESTRA_DATABASE_PORT: "5432"
+      ENV_KESTRA_DATABASE: ${KESTRA_POSTGRES_DB:?set KESTRA_POSTGRES_DB in .env}
+      #? Determinan el usuario y contrasena del usuario base de Kestra
+      ENV_KESTRA_USERNAME: ${KESTRA_POSTGRES_USER:?set KESTRA_POSTGRES_USER in .env}
+      ENV_KESTRA_PASSWORD: ${KESTRA_POSTGRES_PASSWORD:?set KESTRA_POSTGRES_PASSWORD in .env}
+      SNOWFLAKE_ACCOUNT: ${SNOWFLAKE_ACCOUNT:? set SNOWFLAKE_ACCOUNT in .env}
+      SNOWFLAKE_USER: ${SNOWFLAKE_USER:? set SNOWFLAKE_USER in .env}
+      SNOWFLAKE_PASSWORD: ${SNOWFLAKE_PASSWORD:? set SNOWFLAKE_PASSWORD in .env}
+      SNOWFLAKE_ROLE: ${SNOWFLAKE_ROLE:-}
+      SNOWFLAKE_WAREHOUSE: ${SNOWFLAKE_WAREHOUSE:? set SNOWFLAKE_WAREHOUSE in .env}
+      SNOWFLAKE_DATABASE: ${SNOWFLAKE_DATABASE:? set SNOWFLAKE_DATABASE in .env}
+      SNOWFLAKE_SCHEMA: ${SNOWFLAKE_SCHEMA:? set SNOWFLAKE_SCHEMA in .env}
+    ports:
+      - "${KESTRA_PORT}:8080"
+      - "${KESTRA_MANAGEMENT_PORT}:8081"
+    volumes:
+      - ./src/res/config/kestra/application.yml:/etc/kestra/application.yml:ro
+      - ./src/main/kestra/flows:/workspace/kestra/flows
+      - ./src/res/data/raw:/usr/data/landing:ro
+      - kestra_internal_storage:/app/storage
+      - ./src/res/logs/kestra:/tmp/kestra-wd
+      #? Anademos el socket de docker para finalmente poder ejecutar contenedores de Docker internamente
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      kestra-postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:8081/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    restart: unless-stopped
+    networks:
+      - data-platform
+
+  dbt-ui-backend:
+    build:
+      context: ./src/res/docker/custom-images
+      dockerfile: Dockerfile.semana05.backend
+      args:
+        DBT_UI_COMMIT: ${DBT_UI_COMMIT:-1fe89c5d023cd4d7a88642091c303a75839534f9}
+        DBT_CORE_VERSION: "1.12.5"
+        DBT_DUCKDB_VERSION: "1.11.0"
+        DBT_SNOWFLAKE_VERSION: "1.12.1"
+    environment:
+      DBT_UI_HOST: 0.0.0.0
+      DBT_UI_PORT: "8001"
+      DBT_UI_PROJECTS_PATH: /workspace/dbt-projects
+      DBT_UI_DATA_DIR: /var/lib/dbt-ui
+      DBT_PROFILES_DIR: /home/dbtui/.dbt
+      DBT_LOG_PATH: /var/log/dbt
+      DBT_SNOWFLAKE_ACCOUNT: ${SNOWFLAKE_ACCOUNT:? set SNOWFLAKE_ACCOUNT in .env}
+      DBT_SNOWFLAKE_USER: ${SNOWFLAKE_USER:? set SNOWFLAKE_USER in .env}
+      DBT_SNOWFLAKE_PASSWORD: ${SNOWFLAKE_PASSWORD:? set SNOWFLAKE_PASSWORD in .env}
+      DBT_SNOWFLAKE_ROLE: ${SNOWFLAKE_ROLE:-}
+      DBT_SNOWFLAKE_WAREHOUSE: ${SNOWFLAKE_WAREHOUSE:? set SNOWFLAKE_WAREHOUSE in .env}
+      DBT_SNOWFLAKE_DATABASE: ${SNOWFLAKE_DATABASE:? set SNOWFLAKE_DATABASE in .env}
+      DBT_SNOWFLAKE_SCHEMA: ${SNOWFLAKE_SCHEMA:? set SNOWFLAKE_SCHEMA in .env}
+      DBT_SNOWFLAKE_THREADS: ${DBT_SNOWFLAKE_THREADS:-4}
+    volumes:
+      - ./src/main/dbt:/workspace/dbt-projects
+      - ./src/res/config/dbt/profiles:/home/dbtui/.dbt
+      - dbt_ui_data:/var/lib/dbt-ui
+      - ./src/res/logs/dbt:/var/log/dbt
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/api/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    restart: unless-stopped
+    networks:
+      - data-platform
+
+  dbt-ui:
+    build:
+      context: ./src/res/docker/custom-images
+      dockerfile: Dockerfile.semana05.frontend
+      args:
+        DBT_UI_COMMIT: ${DBT_UI_COMMIT:-1fe89c5d023cd4d7a88642091c303a75839534f9}
+    ports:
+      - "${DBT_UI_PORT}:8080"
+    depends_on:
+      dbt-ui-backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1:8080/"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+    networks:
+      - data-platform
+
+  spark:
+    build:
+      context: ./src/res
+      dockerfile: docker/custom-images/Dockerfile.pset2.spark
+    environment:
+      SPARK_DRIVER_MEMORY: ${SPARK_DRIVER_MEMORY:-2g}
+      SPARK_EXECUTOR_MEMORY: ${SPARK_EXECUTOR_MEMORY:-2g}
+      SNOWFLAKE_ACCOUNT: ${SNOWFLAKE_ACCOUNT:? set SNOWFLAKE_ACCOUNT in .env}
+      SNOWFLAKE_USER: ${SNOWFLAKE_USER:? set SNOWFLAKE_USER in .env}
+      SNOWFLAKE_PASSWORD: ${SNOWFLAKE_PASSWORD:? set SNOWFLAKE_PASSWORD in .env}
+      SNOWFLAKE_ROLE: ${SNOWFLAKE_ROLE:-}
+      SNOWFLAKE_WAREHOUSE: ${SNOWFLAKE_WAREHOUSE:? set SNOWFLAKE_WAREHOUSE in .env}
+      SNOWFLAKE_DATABASE: ${SNOWFLAKE_DATABASE:? set SNOWFLAKE_DATABASE in .env}
+      SNOWFLAKE_SCHEMA: ${SNOWFLAKE_SCHEMA:? set SNOWFLAKE_SCHEMA in .env}
+      PYSPARK_PYTHON: /usr/bin/python3
+    volumes:
+      - ./src/main/python/spark/jobs:/opt/spark/jobs:ro
+      - ./src/res/config/spark/spark-defaults.conf:/opt/spark/conf/spark-defaults.conf:ro
+      - ./src/res/config/spark/spark-env.sh:/opt/spark/conf/spark-env.sh:ro
+      - ./src/res/config/spark/log4j2.properties:/opt/spark/conf/log4j2.properties:ro
+      - ./src/res/logs/spark:/opt/spark/logs
+    working_dir: /opt/spark/work
+    command: ["bash", "-lc", "while true; do sleep 3600; done"]
+    restart: unless-stopped
+    networks:
+      - data-platform
+
+volumes:
+  kestra_postgres_data:
+  kestra_internal_storage:
+  dbt_ui_data:
+
+networks:
+  data-platform:
+    name: ciencia-de-datos-data-platform-pset-2
+    driver: bridge
