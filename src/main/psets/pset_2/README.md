@@ -143,3 +143,20 @@ host files and are not put in a Docker volume.
   an emulated platform.
 - dbt-ui’s backend is the process that invokes dbt. Do not replace it with an
   unrelated dbt container; that would remove dbt-ui’s subprocess integration.
+
+## Bronze ingestion flow
+
+The flow at `src/main/kestra/flows/bronze_ingestion.yml` reads the three ZIPs
+from the read-only landing mount. It converts CSV rows to JSON objects in
+`BRONZE.SMART_RAW`, preserving original header names and text values in
+`RAW_RECORD`. Metadata records the archive, CSV member, row number, date (when
+present), and row hash. Replays merge on archive/member/row number. Date inputs
+are optional inclusive `YYYY-MM-DD` filters for smartlog files; the failure
+label archive is always included. A run with no selected rows fails.
+
+Before running, create `BRONZE.SMART_ARCHIVE_STAGE` with the bootstrap scripts,
+provide the `SNOWFLAKE_*` values in the private Compose env file, and import the
+flow into Kestra. Re-import after edits to the YAML; the helper script is read from its bind mount on each run. The flow
+requires the Snowflake JDBC plugin in the Kestra image. Its first live run should
+be checked against the actual ZIP headers, CSV encoding, and Snowflake row
+counts. The helper uses UTF-8 with an optional BOM and refuses malformed CSV.
