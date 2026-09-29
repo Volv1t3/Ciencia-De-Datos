@@ -2,6 +2,10 @@ version: 2
 
 sources:
   - name: bronze
-    description: Raw Alibaba SMART telemetry loaded by Kestra. Table columns remain TBD until the archives are inspected.
+    description: Source-faithful Alibaba SMART telemetry and failure labels loaded by Kestra.
     database: "{{ env_var('SNOWFLAKE_DATABASE') }}"
-    schema: BRONZE
+    schema: S_CDATOS_PSET2_BRONZE
+    tables:
+      - name: smart_2018_raw
+      - name: smart_2019_raw
+      - name: ssd_failure_label_raw

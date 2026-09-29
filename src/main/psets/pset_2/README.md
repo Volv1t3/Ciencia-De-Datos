@@ -71,10 +71,9 @@ are not published to the local network. To use different ports, change
 `KESTRA_PORT`, `KESTRA_MANAGEMENT_PORT`, or `DBT_UI_PORT` in `src/res/env/.env`.
 
 Import `src/main/kestra/flows/bronze_ingestion.yml` in the Kestra UI
-(Flows → Create → Import). It is deliberately a non-destructive skeleton: it
-validates the three archives and records the required future loading stages.
-Its explicit TODO is to inspect source files before deciding extraction rules,
-Bronze columns, `COPY INTO`, and the date-based idempotency key/MERGE strategy.
+(Flows → Create → Import). It validates and consolidates the selected CSV
+members, uploads CSV to the internal Snowflake stage, and idempotently merges
+source-faithful `VARIANT` objects into the three Bronze destination tables.
 
 ## Validation
 
@@ -109,18 +108,21 @@ Spark session and confirms the connector class can be loaded.
 
 ## Snowflake bootstrap and dbt
 
-Set the `SNOWFLAKE_*` values in `src/res/env/.env`; do not put them in Git, the Compose file,
-dbt `profiles.yml`, flow YAML, or Python. Run these scripts in order from a
-Snowflake worksheet using an appropriately privileged role:
+Set the plain `SNOWFLAKE_*` values used by dbt and Spark and the base64-encoded
+`SECRET_SNOWFLAKE_*` values used by Kestra in `src/res/env/.env`; never commit
+that file. The Bronze flow creates its file format, internal stage, and tables
+with `IF NOT EXISTS`. The following scripts remain as an optional manual
+bootstrap/reference and can be run in one Snowflake worksheet session:
 
 1. `src/res/config/snowflake/bootstrap/001_database_and_schemas.sql`
 2. `src/res/config/snowflake/bootstrap/002_file_formats.sql`
 3. `src/res/config/snowflake/bootstrap/003_stages.sql`
+4. `src/res/config/snowflake/bootstrap/004_bronze_tables.sql`
 
-The file-format script is provisional: inspect an actual CSV before enabling
-production loading, especially its null and quoting conventions. dbt’s only
-project lives at `src/main/dbt/ssd_failure_prediction`; its
-profile reads every account-specific value with `env_var()`.
+The stage file format is CSV. Snowflake constructs one source-faithful
+`RAW_RECORD` object from each staged CSV row during the merge. dbt’s project lives at
+`src/main/dbt/ssd_failure_prediction`; its profile reads account-specific
+values with `env_var()`.
 
 ## Stop and reset
 
@@ -143,3 +145,70 @@ host files and are not put in a Docker volume.
   an emulated platform.
 - dbt-ui’s backend is the process that invokes dbt. Do not replace it with an
   unrelated dbt container; that would remove dbt-ui’s subprocess integration.
+
+## Bronze ingestion flow
+
+The flow at `src/main/kestra/flows/bronze_ingestion.yml` reads the three ZIPs
+from the read-only landing mount. It validates each source CSV, stages it, and
+stores its original names and text values in `RAW_RECORD`. The three Bronze
+destinations are `SMART_2018_RAW`, `SMART_2019_RAW`, and
+`SSD_FAILURE_LABEL_RAW`. Metadata records the archive, CSV
+member, row number, date (when present), and row hash. Replays merge on
+archive/member/row number.
+
+The `dataset` input selects `smart_2018`, `smart_2019`, or `failure_labels`
+and safely defaults to the small labels dataset. Date inputs are optional,
+inclusive `YYYY-MM-DD` filters for SMART files. The planner groups the selected
+calendar months in pairs, runs up to six workers in parallel, and makes each
+worker extract and upload its source days sequentially. Each daily temporary
+file is removed after its Snowflake `PUT`, so even a full-year load does not
+materialize a roughly 38 GiB annual CSV. January through March, for example,
+uses two workers: January-February and March. A practical first smoke test is
+`dataset=failure_labels`; a run with no selected source files fails.
+
+The inspected source contract is 105 columns for both SMART years and three
+columns (`model`, `failure_time`, `disk_id`) for the labels. The helper rejects
+schema drift, malformed row widths, invalid UTF-8, and hidden ZIP metadata such
+as `__MACOSX/._ssd_failure_label.csv`.
+
+### Trigger, errores y backfill
+
+El flow usa un **trigger manual bajo demanda**. Esta decisión responde a la
+fuente: Alibaba/Tianchi no ofrece para estos archivos un endpoint estable que
+Kestra pueda consultar o descargar periódicamente. La frecuencia operacional es
+por evento: se ejecuta cuando se recibe una nueva versión de uno de los ZIP o
+cuando se solicita un backfill. La adquisición del ZIP es manual, pero la carga
+no lo es: una vez disponible en la zona `raw`, Kestra valida, particiona, sube,
+fusiona y verifica los datos sin ejecutar SQL ni copiar archivos manualmente a
+Snowflake. Un trigger cron no aportaría datos nuevos y solo reprocesaría los ZIP
+locales sin cambios.
+
+Los errores determinísticos —ZIP ausente, rango inválido, cambio de esquema,
+UTF-8 inválido o fila mal formada— detienen la ejecución inmediatamente. Los
+errores transitorios de Snowflake sí tienen retry exponencial. El DDL y cada
+`PUT` permiten hasta cuatro intentos; el `MERGE`, que puede ser largo, permite
+tres intentos durante un máximo de dos horas. Kestra conserva el estado, intento
+y logs de cada task; la verificación final falla el flow si alguna fila staged
+no aparece en Bronze.
+
+El backfill usa los inputs inclusivos `requested_start_date` y
+`requested_end_date`. Si posteriormente aparece un día que faltaba en 2018, se
+agrega su CSV al ZIP de 2018 y se reejecuta ese día, un rango que lo contenga o
+el año completo. La clave `(SOURCE_ARCHIVE, SOURCE_FILE, SOURCE_ROW)` hace el
+proceso idempotente: una fila idéntica no cambia, una fila nueva se inserta y
+una fila existente cuyo contenido cambió se actualiza únicamente cuando cambia
+`SOURCE_SHA256`. Por tanto, no es necesario convertir el `PUT` en un insert
+condicional; el control de duplicados corresponde al `MERGE` de Bronze. Si una
+versión posterior elimina una fila que antes existía, Bronze no la borra: esa
+reconciliación destructiva debe resolverse explícitamente en Silver, no durante
+la conservación del dato fuente.
+
+Before running, make sure the existing `S_CDATOS_PSET2` database and
+`S_CDATOS_PSET2_BRONZE` schema are available to the configured role. Add the
+five base64-encoded `SECRET_SNOWFLAKE_*` variables shown in `.env.example`,
+restart Kestra so it receives them, and import the flow. The flow itself creates
+`SMART_CSV_FORMAT`, `SMART_ARCHIVE_STAGE`, and the three
+raw tables if they do not exist. Re-import after edits to the YAML; the helper
+script is read from its bind mount on each run. The first live run should still
+be checked against Snowflake row counts. The helper uses UTF-8 with an optional
+BOM and refuses malformed CSV.
