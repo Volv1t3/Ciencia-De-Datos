@@ -8,7 +8,8 @@ datasources:
 kestra:
   server:
     basic-auth:
-      enabled: false
+      username: ${ENV_KESTRA_BASIC_AUTH_USERNAME}
+      password: ${ENV_KESTRA_BASIC_AUTH_PASSWORD}
   repository:
     type: postgres
   queue:

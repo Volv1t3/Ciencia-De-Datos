@@ -163,13 +163,30 @@ job does not issue a remote query or write any table.
 
 | File | What it implements | Integration point |
 | --- | --- | --- |
-| `src/main/kestra/flows/bronze_ingestion.yml` | A deliberately non-destructive Bronze ingestion DAG skeleton. It accepts optional start/end dates, confirms the three exact expected archives can be read, and records the intended extract → discover daily CSV → range selection → stage → COPY → validation sequence. | Imported into the Kestra server. The archive validation reads `/usr/data/landing`, which Compose maps to `src/res/data/raw`. No source archive is modified. |
+| `src/main/kestra/flows/bronze_ingestion.yml` | Bronze ingestion DAG with dataset selection, optional start/end dates, up to six parallel two-month workers, per-day CSV staging, three idempotent destination merges, and a missing-row verification gate. | Imported into the Kestra server. The archive reader uses `/usr/data/landing`, which Compose maps to `src/res/data/raw`. No source archive is modified. |
 | `src/main/kestra/flows/README.md` | Explains that flow YAML is source code and must be imported manually. | Prevents the mistaken assumption that a bind mount automatically registers flows. |
 
-The flow intentionally has no production `COPY INTO`: the file headers, quoting,
-null convention, and column layout of the actual Alibaba archives must be
-inspected first. Its idempotency note requires a final date/disk key or `MERGE`
-policy before retry/backfill is enabled.
+The inspected SMART contract has 105 columns in both years; the labels contract
+has `model`, `failure_time`, and `disk_id`. The flow preserves source strings in
+`RAW_RECORD` and uses archive/member/row as its Bronze replay key. SMART
+backfills are planned from the dates that actually exist in each ZIP. Workers
+handle at most two calendar months and upload one day at a time, avoiding a
+roughly 38 GiB local annual intermediate.
+
+The ingestion is intentionally started on demand rather than by cron because
+the Tianchi source does not expose a stable downloadable endpoint for these
+archives. Operational frequency follows archive availability or a requested
+historical backfill. Once an archive is placed in the read-only landing mount,
+all validation, staging, loading, merging, and verification are automated by
+Kestra; operators do not manually load Snowflake.
+
+Snowflake DDL and daily `PUT` tasks use bounded exponential retries, while the
+long-running idempotent `MERGE` permits three attempts over at most two hours.
+Deterministic source-validation failures are deliberately not retried. Backfill
+reruns a selected historical range: unseen source coordinates are inserted,
+unchanged coordinates are no-ops, and changed records are updated only when the
+stored SHA-256 differs. Source rows omitted by a later archive are not deleted
+from Bronze; destructive reconciliation belongs in a downstream modeled layer.
 
 ### dbt project source
 
@@ -177,7 +194,7 @@ policy before retry/backfill is enabled.
 | --- | --- | --- |
 | `src/main/dbt/ssd_failure_prediction/dbt_project.yml` | Defines a valid dbt project named `ssd_failure_prediction`, selects its profile, discovers models/macros/tests, and maps future `silver` and `gold` models to the corresponding Snowflake schemas. | dbt-ui discovers this project beneath `/workspace/dbt-projects`; dbt reads the profile from `src/res/config/dbt/profiles`. |
 | `packages.yml` | Declares no dbt packages. | Keeps the scaffold minimal and avoids unnecessary third-party code. |
-| `models/sources/sources.yml` | Declares the conceptual `bronze` source in the configured Snowflake database and `BRONZE` schema. It deliberately names no table or columns. | Future Silver models can refer to `source('bronze', ...)` after source data has been inspected and a table is defined. |
+| `models/sources/sources.yml` | Declares the three raw Bronze tables in the configured Snowflake database and `S_CDATOS_PSET2_BRONZE` schema. | Silver models can refer to the annual SMART and failure-label inputs with `source('bronze', ...)`. |
 | `models/silver/.gitkeep` | Reserves the source-controlled location for future Silver dbt models. | The `+schema: SILVER` project configuration applies here. |
 | `models/gold/.gitkeep` | Reserves the source-controlled location for future Gold dbt models. | The `+schema: GOLD` project configuration applies here. |
 | `macros/.gitkeep` | Reserves the project macro directory. | dbt will discover macros added here. |
@@ -223,19 +240,20 @@ must also be the value of `SNOWFLAKE_DATABASE` in `src/res/env/.env` for dbt and
    `PROJECT_DATABASE` and creates only the `BRONZE`, `SILVER`, `GOLD`, and `OBT`
    schemas under that database using `IDENTIFIER()`.
 4. Without opening a new worksheet/session, run `002_file_formats.sql`, then
-   `003_stages.sql`. Both use the session’s `PROJECT_DATABASE` variable.
-5. Put the same database value in `src/res/env/.env` as `SNOWFLAKE_DATABASE`; choose
-   `BRONZE` as the initial `SNOWFLAKE_SCHEMA` when validating raw ingestion.
+   `003_stages.sql`, then `004_bronze_tables.sql`. All use the session’s
+   `PROJECT_DATABASE` variable.
+5. Put `S_CDATOS_PSET2` in `src/res/env/.env` as `SNOWFLAKE_DATABASE` and
+   `S_CDATOS_PSET2_BRONZE` as `SNOWFLAKE_SCHEMA` for dbt and Spark.
 
 | File | What it does | Why it is separate |
 | --- | --- | --- |
 | `snowflake/bootstrap/001_database_and_schemas.sql` | Requires the caller to set an existing database name, derives qualified schema identifiers, and idempotently creates BRONZE, SILVER, GOLD, and OBT schemas. | Schema topology is warehouse setup, not dbt/Spark application logic. No database is named or created in Git. |
-| `snowflake/bootstrap/002_file_formats.sql` | Selects the caller’s existing database and BRONZE schema, then idempotently defines `SMART_CSV_FORMAT`. | Kestra’s eventual Bronze load will reference a named Snowflake file format. CSV details remain provisional until real files are inspected. |
-| `snowflake/bootstrap/003_stages.sql` | Selects the same database/schema and idempotently creates `SMART_ARCHIVE_STAGE` using `SMART_CSV_FORMAT`. | Future Kestra ingestion can upload archive-derived files to this internal stage before a dataset-specific `COPY INTO`. |
+| `snowflake/bootstrap/002_file_formats.sql` | Selects the configured Bronze schema and idempotently defines `SMART_CSV_FORMAT`. | Matches the validated CSV produced by the Kestra helper. |
+| `snowflake/bootstrap/003_stages.sql` | Selects the same database/schema and idempotently creates `SMART_ARCHIVE_STAGE` using `SMART_CSV_FORMAT`. | Kestra uploads archive-derived CSV before the merge. |
+| `snowflake/bootstrap/004_bronze_tables.sql` | Idempotently creates the execution staging table and the three source-faithful Bronze destination tables. | Establishes the exact table contract used by Kestra and dbt. |
 
-`002` currently sets comma delimiter, one header row, optional double-quote
-enclosure, and empty fields as null. Those are a starting configuration, not a
-claim about uninspected input. Verify the real data before any load is enabled.
+The helper has already inspected the source CSV contract and emits validated
+CSV, so `002` defines the CSV file format consumed by the stage.
 
 ## Data and log resources
 

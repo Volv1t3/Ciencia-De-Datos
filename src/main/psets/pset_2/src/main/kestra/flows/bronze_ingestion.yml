@@ -1,138 +1,334 @@
 id: bronze_ingestion
 namespace: ssd_failure_prediction
-description: Load Tianchi CSV rows into Snowflake BRONZE as schema-independent raw JSON.
+description: Stage validated Tianchi CSV rows and merge source-faithful VARIANT records into Bronze.
 concurrency:
   limit: 1
 inputs:
+  - id: dataset
+    type: SELECT
+    values: [smart_2018, smart_2019, failure_labels]
+    defaults: failure_labels
+    description: One source dataset per execution so historical loads stay bounded.
   - id: requested_start_date
     type: STRING
     required: false
-    description: Inclusive YYYY-MM-DD filter for dated smartlog CSV files.
+    description: Inclusive YYYY-MM-DD filter for dated SMART CSV files.
   - id: requested_end_date
     type: STRING
     required: false
-    description: Inclusive YYYY-MM-DD filter for dated smartlog CSV files.
+    description: Inclusive YYYY-MM-DD filter for dated SMART CSV files.
+
 tasks:
-  - id: prepare_rows
+  - id: create_csv_file_format
+    type: io.kestra.plugin.jdbc.snowflake.Query
+    retry:
+      type: exponential
+      interval: PT10S
+      maxInterval: PT1M
+      maxAttempts: 4
+      maxDuration: PT10M
+      warningOnRetry: true
+    url: "jdbc:snowflake://{{ secret('SNOWFLAKE_ACCOUNT') }}.snowflakecomputing.com"
+    username: "{{ secret('SNOWFLAKE_USER') }}"
+    password: "{{ secret('SNOWFLAKE_PASSWORD') }}"
+    role: "{{ secret('SNOWFLAKE_ROLE') }}"
+    warehouse: "{{ secret('SNOWFLAKE_WAREHOUSE') }}"
+    database: S_CDATOS_PSET2
+    schema: S_CDATOS_PSET2_BRONZE
+    queryTag: "kestra-bronze-ingestion-{{ execution.id }}"
+    connectionPooling: false
+    sql: |
+      CREATE FILE FORMAT IF NOT EXISTS S_CDATOS_PSET2.S_CDATOS_PSET2_BRONZE.SMART_CSV_FORMAT
+        TYPE = CSV FIELD_DELIMITER = ',' SKIP_HEADER = 1
+        FIELD_OPTIONALLY_ENCLOSED_BY = '"' EMPTY_FIELD_AS_NULL = TRUE
+        ENCODING = 'UTF8' COMPRESSION = AUTO
+
+  - id: create_smart_archive_stage
+    type: io.kestra.plugin.jdbc.snowflake.Query
+    retry:
+      type: exponential
+      interval: PT10S
+      maxInterval: PT1M
+      maxAttempts: 4
+      maxDuration: PT10M
+      warningOnRetry: true
+    url: "jdbc:snowflake://{{ secret('SNOWFLAKE_ACCOUNT') }}.snowflakecomputing.com"
+    username: "{{ secret('SNOWFLAKE_USER') }}"
+    password: "{{ secret('SNOWFLAKE_PASSWORD') }}"
+    role: "{{ secret('SNOWFLAKE_ROLE') }}"
+    warehouse: "{{ secret('SNOWFLAKE_WAREHOUSE') }}"
+    database: S_CDATOS_PSET2
+    schema: S_CDATOS_PSET2_BRONZE
+    queryTag: "kestra-bronze-ingestion-{{ execution.id }}"
+    connectionPooling: false
+    sql: |
+      CREATE STAGE IF NOT EXISTS S_CDATOS_PSET2.S_CDATOS_PSET2_BRONZE.SMART_ARCHIVE_STAGE
+        FILE_FORMAT = S_CDATOS_PSET2.S_CDATOS_PSET2_BRONZE.SMART_CSV_FORMAT
+
+  - id: configure_smart_archive_stage
+    type: io.kestra.plugin.jdbc.snowflake.Query
+    retry:
+      type: exponential
+      interval: PT10S
+      maxInterval: PT1M
+      maxAttempts: 4
+      maxDuration: PT10M
+      warningOnRetry: true
+    url: "jdbc:snowflake://{{ secret('SNOWFLAKE_ACCOUNT') }}.snowflakecomputing.com"
+    username: "{{ secret('SNOWFLAKE_USER') }}"
+    password: "{{ secret('SNOWFLAKE_PASSWORD') }}"
+    role: "{{ secret('SNOWFLAKE_ROLE') }}"
+    warehouse: "{{ secret('SNOWFLAKE_WAREHOUSE') }}"
+    database: S_CDATOS_PSET2
+    schema: S_CDATOS_PSET2_BRONZE
+    queryTag: "kestra-bronze-ingestion-{{ execution.id }}"
+    connectionPooling: false
+    sql: |
+      ALTER STAGE S_CDATOS_PSET2.S_CDATOS_PSET2_BRONZE.SMART_ARCHIVE_STAGE
+        SET FILE_FORMAT = S_CDATOS_PSET2.S_CDATOS_PSET2_BRONZE.SMART_CSV_FORMAT
+
+  - id: create_smart_2018_table
+    type: io.kestra.plugin.jdbc.snowflake.Query
+    retry:
+      type: exponential
+      interval: PT10S
+      maxInterval: PT1M
+      maxAttempts: 4
+      maxDuration: PT10M
+      warningOnRetry: true
+    url: "jdbc:snowflake://{{ secret('SNOWFLAKE_ACCOUNT') }}.snowflakecomputing.com"
+    username: "{{ secret('SNOWFLAKE_USER') }}"
+    password: "{{ secret('SNOWFLAKE_PASSWORD') }}"
+    role: "{{ secret('SNOWFLAKE_ROLE') }}"
+    warehouse: "{{ secret('SNOWFLAKE_WAREHOUSE') }}"
+    database: S_CDATOS_PSET2
+    schema: S_CDATOS_PSET2_BRONZE
+    queryTag: "kestra-bronze-ingestion-{{ execution.id }}"
+    connectionPooling: false
+    sql: |
+      CREATE TABLE IF NOT EXISTS S_CDATOS_PSET2.S_CDATOS_PSET2_BRONZE.SMART_2018_RAW (
+        SOURCE_ARCHIVE VARCHAR, SOURCE_FILE VARCHAR, SOURCE_ROW NUMBER,
+        SOURCE_DATE DATE, SOURCE_SHA256 VARCHAR, RAW_RECORD VARIANT,
+        INGESTED_AT TIMESTAMP_LTZ DEFAULT CURRENT_TIMESTAMP()
+      )
+
+  - id: create_smart_2019_table
+    type: io.kestra.plugin.jdbc.snowflake.Query
+    retry:
+      type: exponential
+      interval: PT10S
+      maxInterval: PT1M
+      maxAttempts: 4
+      maxDuration: PT10M
+      warningOnRetry: true
+    url: "jdbc:snowflake://{{ secret('SNOWFLAKE_ACCOUNT') }}.snowflakecomputing.com"
+    username: "{{ secret('SNOWFLAKE_USER') }}"
+    password: "{{ secret('SNOWFLAKE_PASSWORD') }}"
+    role: "{{ secret('SNOWFLAKE_ROLE') }}"
+    warehouse: "{{ secret('SNOWFLAKE_WAREHOUSE') }}"
+    database: S_CDATOS_PSET2
+    schema: S_CDATOS_PSET2_BRONZE
+    queryTag: "kestra-bronze-ingestion-{{ execution.id }}"
+    connectionPooling: false
+    sql: |
+      CREATE TABLE IF NOT EXISTS S_CDATOS_PSET2.S_CDATOS_PSET2_BRONZE.SMART_2019_RAW
+        LIKE S_CDATOS_PSET2.S_CDATOS_PSET2_BRONZE.SMART_2018_RAW
+
+  - id: create_failure_label_table
+    type: io.kestra.plugin.jdbc.snowflake.Query
+    retry:
+      type: exponential
+      interval: PT10S
+      maxInterval: PT1M
+      maxAttempts: 4
+      maxDuration: PT10M
+      warningOnRetry: true
+    url: "jdbc:snowflake://{{ secret('SNOWFLAKE_ACCOUNT') }}.snowflakecomputing.com"
+    username: "{{ secret('SNOWFLAKE_USER') }}"
+    password: "{{ secret('SNOWFLAKE_PASSWORD') }}"
+    role: "{{ secret('SNOWFLAKE_ROLE') }}"
+    warehouse: "{{ secret('SNOWFLAKE_WAREHOUSE') }}"
+    database: S_CDATOS_PSET2
+    schema: S_CDATOS_PSET2_BRONZE
+    queryTag: "kestra-bronze-ingestion-{{ execution.id }}"
+    connectionPooling: false
+    sql: |
+      CREATE TABLE IF NOT EXISTS S_CDATOS_PSET2.S_CDATOS_PSET2_BRONZE.SSD_FAILURE_LABEL_RAW
+        LIKE S_CDATOS_PSET2.S_CDATOS_PSET2_BRONZE.SMART_2018_RAW
+
+  - id: plan_partitions
     type: io.kestra.plugin.scripts.shell.Commands
     taskRunner:
       type: io.kestra.plugin.core.runner.Process
     env:
       START_DATE: "{{ inputs.requested_start_date | default('') }}"
       END_DATE: "{{ inputs.requested_end_date | default('') }}"
-      BATCH_ID: "{{ execution.id }}"
+      DATASET: "{{ inputs.dataset }}"
     commands:
-      - python3 /workspace/kestra/flows/prepare_bronze.py bronze_rows.jsonl
-    outputFiles:
-      - bronze_rows.jsonl
+      - python3 /workspace/kestra/flows/prepare_bronze.py plan partitions.json
+    outputFiles: [partitions.json]
 
-  - id: ensure_bronze_tables
-    type: io.kestra.plugin.jdbc.snowflake.Queries
-    url: "jdbc:snowflake://{{ envs.snowflake_account }}.snowflakecomputing.com"
-    username: "{{ envs.snowflake_user }}"
-    password: "{{ envs.snowflake_password }}"
-    database: "{{ envs.snowflake_database }}"
-    schema: BRONZE
-    warehouse: "{{ envs.snowflake_warehouse }}"
-    sql: |
-      CREATE TABLE IF NOT EXISTS BRONZE.SMART_RAW_STAGING (
-        BATCH_ID VARCHAR, SOURCE_ARCHIVE VARCHAR, SOURCE_FILE VARCHAR,
-        SOURCE_ROW NUMBER, SOURCE_DATE DATE, SOURCE_SHA256 VARCHAR,
-        RAW_RECORD VARIANT, INGESTED_AT TIMESTAMP_LTZ DEFAULT CURRENT_TIMESTAMP()
-      );
-      CREATE TABLE IF NOT EXISTS BRONZE.SMART_RAW (
-        SOURCE_ARCHIVE VARCHAR, SOURCE_FILE VARCHAR, SOURCE_ROW NUMBER,
-        SOURCE_DATE DATE, SOURCE_SHA256 VARCHAR, RAW_RECORD VARIANT,
-        INGESTED_AT TIMESTAMP_LTZ DEFAULT CURRENT_TIMESTAMP()
-      );
+  - id: partition_workers
+    type: io.kestra.plugin.core.flow.ForEach
+    values: "{{ fromJson(read(outputs.plan_partitions.outputFiles['partitions.json'])) }}"
+    concurrencyLimit: 6
+    tasks:
+      - id: worker_days
+        type: io.kestra.plugin.core.flow.ForEach
+        values: "{{ fromJson(taskrun.value).dates }}"
+        concurrencyLimit: 1
+        tasks:
+          - id: prepare_day
+            type: io.kestra.plugin.scripts.shell.Commands
+            taskRunner:
+              type: io.kestra.plugin.core.runner.Process
+            env:
+              DATASET: "{{ inputs.dataset }}"
+            commands:
+              - mkdir -p "/tmp/kestra-wd/bronze/{{ execution.id }}/{{ inputs.dataset }}/{{ taskrun.value }}"
+              - python3 /workspace/kestra/flows/prepare_bronze.py extract "{{ taskrun.value }}" "/tmp/kestra-wd/bronze/{{ execution.id }}/{{ inputs.dataset }}/{{ taskrun.value }}/bronze_rows.csv"
 
-  - id: upload_rows
-    type: io.kestra.plugin.jdbc.snowflake.Upload
-    url: "jdbc:snowflake://{{ envs.snowflake_account }}.snowflakecomputing.com"
-    username: "{{ envs.snowflake_user }}"
-    password: "{{ envs.snowflake_password }}"
-    database: "{{ envs.snowflake_database }}"
-    schema: BRONZE
-    warehouse: "{{ envs.snowflake_warehouse }}"
-    from: "{{ outputs.prepare_rows.outputFiles['bronze_rows.jsonl'] }}"
-    stageName: "@{{ envs.snowflake_database }}.BRONZE.SMART_ARCHIVE_STAGE"
-    prefix: "kestra/{{ execution.id }}"
-    fileName: bronze_rows.jsonl
-    compress: true
+          - id: upload_day
+            type: io.kestra.plugin.jdbc.snowflake.Query
+            retry:
+              type: exponential
+              interval: PT15S
+              maxInterval: PT2M
+              maxAttempts: 4
+              maxDuration: PT30M
+              warningOnRetry: true
+            url: "jdbc:snowflake://{{ secret('SNOWFLAKE_ACCOUNT') }}.snowflakecomputing.com"
+            username: "{{ secret('SNOWFLAKE_USER') }}"
+            password: "{{ secret('SNOWFLAKE_PASSWORD') }}"
+            role: "{{ secret('SNOWFLAKE_ROLE') }}"
+            warehouse: "{{ secret('SNOWFLAKE_WAREHOUSE') }}"
+            database: S_CDATOS_PSET2
+            schema: S_CDATOS_PSET2_BRONZE
+            queryTag: "kestra-bronze-ingestion-{{ execution.id }}"
+            connectionPooling: false
+            sql: |
+              PUT file:///tmp/kestra-wd/bronze/{{ execution.id }}/{{ inputs.dataset }}/{{ taskrun.value }}/bronze_rows.csv
+                @S_CDATOS_PSET2.S_CDATOS_PSET2_BRONZE.SMART_ARCHIVE_STAGE/kestra/{{ execution.id }}/{{ inputs.dataset }}/{{ taskrun.value }}/
+                AUTO_COMPRESS = TRUE OVERWRITE = TRUE
 
-  - id: copy_rows
+          - id: cleanup_day
+            type: io.kestra.plugin.scripts.shell.Commands
+            taskRunner:
+              type: io.kestra.plugin.core.runner.Process
+            commands:
+              - rm -f "/tmp/kestra-wd/bronze/{{ execution.id }}/{{ inputs.dataset }}/{{ taskrun.value }}/bronze_rows.csv"
+
+  - id: merge_csv
     type: io.kestra.plugin.jdbc.snowflake.Query
-    url: "jdbc:snowflake://{{ envs.snowflake_account }}.snowflakecomputing.com"
-    username: "{{ envs.snowflake_user }}"
-    password: "{{ envs.snowflake_password }}"
-    database: "{{ envs.snowflake_database }}"
-    schema: BRONZE
-    warehouse: "{{ envs.snowflake_warehouse }}"
+    retry:
+      type: exponential
+      interval: PT30S
+      maxInterval: PT5M
+      maxAttempts: 3
+      maxDuration: PT2H
+      warningOnRetry: true
+    url: "jdbc:snowflake://{{ secret('SNOWFLAKE_ACCOUNT') }}.snowflakecomputing.com"
+    username: "{{ secret('SNOWFLAKE_USER') }}"
+    password: "{{ secret('SNOWFLAKE_PASSWORD') }}"
+    role: "{{ secret('SNOWFLAKE_ROLE') }}"
+    warehouse: "{{ secret('SNOWFLAKE_WAREHOUSE') }}"
+    database: S_CDATOS_PSET2
+    schema: S_CDATOS_PSET2_BRONZE
+    queryTag: "kestra-bronze-ingestion-{{ execution.id }}"
+    connectionPooling: false
     sql: |
-      COPY INTO BRONZE.SMART_RAW_STAGING
-        (BATCH_ID, SOURCE_ARCHIVE, SOURCE_FILE, SOURCE_ROW,
-         SOURCE_DATE, SOURCE_SHA256, RAW_RECORD)
-      FROM (
-        SELECT $1:batch::VARCHAR, $1:archive::VARCHAR, $1:file::VARCHAR,
-               $1:row::NUMBER, TRY_TO_DATE($1:date::VARCHAR),
-               $1:sha256::VARCHAR, $1:values
-        FROM @{{ envs.snowflake_database }}.BRONZE.SMART_ARCHIVE_STAGE/kestra/{{ execution.id }}/
-      )
-      FILE_FORMAT = (TYPE = JSON COMPRESSION = AUTO)
-      PATTERN = '.*bronze_rows[.]jsonl[.]gz'
-      ON_ERROR = ABORT_STATEMENT;
-
-  - id: merge_rows
-    type: io.kestra.plugin.jdbc.snowflake.Query
-    url: "jdbc:snowflake://{{ envs.snowflake_account }}.snowflakecomputing.com"
-    username: "{{ envs.snowflake_user }}"
-    password: "{{ envs.snowflake_password }}"
-    database: "{{ envs.snowflake_database }}"
-    schema: BRONZE
-    warehouse: "{{ envs.snowflake_warehouse }}"
-    sql: |
-      MERGE INTO BRONZE.SMART_RAW AS target
+      {% if inputs.dataset == 'smart_2018' %}{% set target_table = 'SMART_2018_RAW' %}
+      {% elseif inputs.dataset == 'smart_2019' %}{% set target_table = 'SMART_2019_RAW' %}
+      {% else %}{% set target_table = 'SSD_FAILURE_LABEL_RAW' %}{% endif %}
+      MERGE INTO S_CDATOS_PSET2.S_CDATOS_PSET2_BRONZE.{{ target_table }} AS target
       USING (
-        SELECT SOURCE_ARCHIVE, SOURCE_FILE, SOURCE_ROW, SOURCE_DATE,
-               SOURCE_SHA256, RAW_RECORD
-        FROM BRONZE.SMART_RAW_STAGING
-        WHERE BATCH_ID = '{{ execution.id }}'
-        QUALIFY ROW_NUMBER() OVER (
-          PARTITION BY SOURCE_ARCHIVE, SOURCE_FILE, SOURCE_ROW
-          ORDER BY INGESTED_AT DESC
-        ) = 1
+        SELECT source_archive, source_file, source_row, source_date,
+               SHA2(TO_JSON(raw_record), 256) AS source_sha256, raw_record
+        FROM (
+          SELECT $1::VARCHAR AS source_archive, $2::VARCHAR AS source_file,
+                 $3::NUMBER AS source_row, TRY_TO_DATE($4::VARCHAR) AS source_date,
+          {% if inputs.dataset == 'failure_labels' %}
+                 OBJECT_CONSTRUCT_KEEP_NULL(
+                   'model', NULLIF($5::VARCHAR, ''),
+                   'failure_time', NULLIF($6::VARCHAR, ''),
+                   'disk_id', NULLIF($7::VARCHAR, '')
+                 ) AS raw_record
+          {% else %}
+                 OBJECT_CONSTRUCT_KEEP_NULL(
+                   'disk_id',NULLIF($5::VARCHAR,''),'ds',NULLIF($6::VARCHAR,''),'model',NULLIF($7::VARCHAR,''),
+                   'n_1',NULLIF($8::VARCHAR,''),'r_1',NULLIF($9::VARCHAR,''),'n_2',NULLIF($10::VARCHAR,''),'r_2',NULLIF($11::VARCHAR,''),
+                   'n_3',NULLIF($12::VARCHAR,''),'r_3',NULLIF($13::VARCHAR,''),'n_4',NULLIF($14::VARCHAR,''),'r_4',NULLIF($15::VARCHAR,''),
+                   'n_5',NULLIF($16::VARCHAR,''),'r_5',NULLIF($17::VARCHAR,''),'n_6',NULLIF($18::VARCHAR,''),'r_6',NULLIF($19::VARCHAR,''),
+                   'n_7',NULLIF($20::VARCHAR,''),'r_7',NULLIF($21::VARCHAR,''),'n_8',NULLIF($22::VARCHAR,''),'r_8',NULLIF($23::VARCHAR,''),
+                   'n_9',NULLIF($24::VARCHAR,''),'r_9',NULLIF($25::VARCHAR,''),'n_10',NULLIF($26::VARCHAR,''),'r_10',NULLIF($27::VARCHAR,''),
+                   'n_11',NULLIF($28::VARCHAR,''),'r_11',NULLIF($29::VARCHAR,''),'n_12',NULLIF($30::VARCHAR,''),'r_12',NULLIF($31::VARCHAR,''),
+                   'n_13',NULLIF($32::VARCHAR,''),'r_13',NULLIF($33::VARCHAR,''),'n_170',NULLIF($34::VARCHAR,''),'r_170',NULLIF($35::VARCHAR,''),
+                   'n_171',NULLIF($36::VARCHAR,''),'r_171',NULLIF($37::VARCHAR,''),'n_172',NULLIF($38::VARCHAR,''),'r_172',NULLIF($39::VARCHAR,''),
+                   'n_173',NULLIF($40::VARCHAR,''),'r_173',NULLIF($41::VARCHAR,''),'n_174',NULLIF($42::VARCHAR,''),'r_174',NULLIF($43::VARCHAR,''),
+                   'n_177',NULLIF($44::VARCHAR,''),'r_177',NULLIF($45::VARCHAR,''),'n_180',NULLIF($46::VARCHAR,''),'r_180',NULLIF($47::VARCHAR,''),
+                   'n_181',NULLIF($48::VARCHAR,''),'r_181',NULLIF($49::VARCHAR,''),'n_182',NULLIF($50::VARCHAR,''),'r_182',NULLIF($51::VARCHAR,''),
+                   'n_183',NULLIF($52::VARCHAR,''),'r_183',NULLIF($53::VARCHAR,''),'n_184',NULLIF($54::VARCHAR,''),'r_184',NULLIF($55::VARCHAR,''),
+                   'n_187',NULLIF($56::VARCHAR,''),'r_187',NULLIF($57::VARCHAR,''),'n_188',NULLIF($58::VARCHAR,''),'r_188',NULLIF($59::VARCHAR,''),
+                   'n_189',NULLIF($60::VARCHAR,''),'r_189',NULLIF($61::VARCHAR,''),'n_190',NULLIF($62::VARCHAR,''),'r_190',NULLIF($63::VARCHAR,''),
+                   'n_191',NULLIF($64::VARCHAR,''),'r_191',NULLIF($65::VARCHAR,''),'n_192',NULLIF($66::VARCHAR,''),'r_192',NULLIF($67::VARCHAR,''),
+                   'n_193',NULLIF($68::VARCHAR,''),'r_193',NULLIF($69::VARCHAR,''),'n_194',NULLIF($70::VARCHAR,''),'r_194',NULLIF($71::VARCHAR,''),
+                   'n_195',NULLIF($72::VARCHAR,''),'r_195',NULLIF($73::VARCHAR,''),'n_196',NULLIF($74::VARCHAR,''),'r_196',NULLIF($75::VARCHAR,''),
+                   'n_197',NULLIF($76::VARCHAR,''),'r_197',NULLIF($77::VARCHAR,''),'n_198',NULLIF($78::VARCHAR,''),'r_198',NULLIF($79::VARCHAR,''),
+                   'n_199',NULLIF($80::VARCHAR,''),'r_199',NULLIF($81::VARCHAR,''),'n_200',NULLIF($82::VARCHAR,''),'r_200',NULLIF($83::VARCHAR,''),
+                   'n_204',NULLIF($84::VARCHAR,''),'r_204',NULLIF($85::VARCHAR,''),'n_205',NULLIF($86::VARCHAR,''),'r_205',NULLIF($87::VARCHAR,''),
+                   'n_206',NULLIF($88::VARCHAR,''),'r_206',NULLIF($89::VARCHAR,''),'n_207',NULLIF($90::VARCHAR,''),'r_207',NULLIF($91::VARCHAR,''),
+                   'n_211',NULLIF($92::VARCHAR,''),'r_211',NULLIF($93::VARCHAR,''),'n_233',NULLIF($94::VARCHAR,''),'r_233',NULLIF($95::VARCHAR,''),
+                   'n_240',NULLIF($96::VARCHAR,''),'r_240',NULLIF($97::VARCHAR,''),'n_241',NULLIF($98::VARCHAR,''),'r_241',NULLIF($99::VARCHAR,''),
+                   'n_242',NULLIF($100::VARCHAR,''),'r_242',NULLIF($101::VARCHAR,''),'n_244',NULLIF($102::VARCHAR,''),'r_244',NULLIF($103::VARCHAR,''),
+                   'n_245',NULLIF($104::VARCHAR,''),'r_245',NULLIF($105::VARCHAR,''),'n_175',NULLIF($106::VARCHAR,''),'r_175',NULLIF($107::VARCHAR,''),
+                   'n_232',NULLIF($108::VARCHAR,''),'r_232',NULLIF($109::VARCHAR,'')
+                 ) AS raw_record
+          {% endif %}
+          FROM @S_CDATOS_PSET2.S_CDATOS_PSET2_BRONZE.SMART_ARCHIVE_STAGE/kestra/{{ execution.id }}/{{ inputs.dataset }}/
+            (PATTERN => '.*bronze_rows[.]csv[.]gz')
+        ) prepared
       ) AS source
-      ON target.SOURCE_ARCHIVE = source.SOURCE_ARCHIVE
-       AND target.SOURCE_FILE = source.SOURCE_FILE
-       AND target.SOURCE_ROW = source.SOURCE_ROW
-      WHEN MATCHED AND target.SOURCE_SHA256 <> source.SOURCE_SHA256 THEN UPDATE SET
-        SOURCE_DATE = source.SOURCE_DATE,
-        SOURCE_SHA256 = source.SOURCE_SHA256,
-        RAW_RECORD = source.RAW_RECORD,
-        INGESTED_AT = CURRENT_TIMESTAMP()
+      ON target.SOURCE_ARCHIVE = source.source_archive
+       AND target.SOURCE_FILE = source.source_file
+       AND target.SOURCE_ROW = source.source_row
+      WHEN MATCHED AND target.SOURCE_SHA256 <> source.source_sha256 THEN UPDATE SET
+        SOURCE_DATE=source.source_date, SOURCE_SHA256=source.source_sha256,
+        RAW_RECORD=source.raw_record, INGESTED_AT=CURRENT_TIMESTAMP()
       WHEN NOT MATCHED THEN INSERT
-        (SOURCE_ARCHIVE, SOURCE_FILE, SOURCE_ROW, SOURCE_DATE, SOURCE_SHA256, RAW_RECORD)
-        VALUES (source.SOURCE_ARCHIVE, source.SOURCE_FILE, source.SOURCE_ROW,
-                source.SOURCE_DATE, source.SOURCE_SHA256, source.RAW_RECORD);
+        (SOURCE_ARCHIVE,SOURCE_FILE,SOURCE_ROW,SOURCE_DATE,SOURCE_SHA256,RAW_RECORD)
+        VALUES (source.source_archive,source.source_file,source.source_row,
+                source.source_date,source.source_sha256,source.raw_record);
 
   - id: verify_load
     type: io.kestra.plugin.jdbc.snowflake.Query
-    url: "jdbc:snowflake://{{ envs.snowflake_account }}.snowflakecomputing.com"
-    username: "{{ envs.snowflake_user }}"
-    password: "{{ envs.snowflake_password }}"
-    database: "{{ envs.snowflake_database }}"
-    schema: BRONZE
-    warehouse: "{{ envs.snowflake_warehouse }}"
-    sql: |
-      SELECT COUNT(*) AS MISSING_ROWS
-      FROM BRONZE.SMART_RAW_STAGING s
-      LEFT JOIN BRONZE.SMART_RAW t
-        ON t.SOURCE_ARCHIVE = s.SOURCE_ARCHIVE
-       AND t.SOURCE_FILE = s.SOURCE_FILE
-       AND t.SOURCE_ROW = s.SOURCE_ROW
-       AND t.SOURCE_SHA256 = s.SOURCE_SHA256
-      WHERE s.BATCH_ID = '{{ execution.id }}' AND t.SOURCE_ROW IS NULL
+    retry:
+      type: exponential
+      interval: PT15S
+      maxInterval: PT2M
+      maxAttempts: 4
+      maxDuration: PT30M
+      warningOnRetry: true
+    url: "jdbc:snowflake://{{ secret('SNOWFLAKE_ACCOUNT') }}.snowflakecomputing.com"
+    username: "{{ secret('SNOWFLAKE_USER') }}"
+    password: "{{ secret('SNOWFLAKE_PASSWORD') }}"
+    role: "{{ secret('SNOWFLAKE_ROLE') }}"
+    warehouse: "{{ secret('SNOWFLAKE_WAREHOUSE') }}"
+    database: S_CDATOS_PSET2
+    schema: S_CDATOS_PSET2_BRONZE
+    queryTag: "kestra-bronze-ingestion-{{ execution.id }}"
+    connectionPooling: false
     fetchType: FETCH_ONE
+    sql: |
+      {% if inputs.dataset == 'smart_2018' %}{% set target_table = 'SMART_2018_RAW' %}
+      {% elseif inputs.dataset == 'smart_2019' %}{% set target_table = 'SMART_2019_RAW' %}
+      {% else %}{% set target_table = 'SSD_FAILURE_LABEL_RAW' %}{% endif %}
+      SELECT COUNT(*) AS MISSING_ROWS
+      FROM @S_CDATOS_PSET2.S_CDATOS_PSET2_BRONZE.SMART_ARCHIVE_STAGE/kestra/{{ execution.id }}/{{ inputs.dataset }}/
+        (PATTERN => '.*bronze_rows[.]csv[.]gz') s
+      LEFT JOIN S_CDATOS_PSET2.S_CDATOS_PSET2_BRONZE.{{ target_table }} t
+        ON t.SOURCE_ARCHIVE=s.$1::VARCHAR AND t.SOURCE_FILE=s.$2::VARCHAR
+       AND t.SOURCE_ROW=s.$3::NUMBER
+      WHERE t.SOURCE_ROW IS NULL
 
   - id: fail_if_incomplete
     type: io.kestra.plugin.core.execution.Fail
