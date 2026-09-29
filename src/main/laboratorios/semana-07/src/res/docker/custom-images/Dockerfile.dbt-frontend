@@ -1,0 +1,21 @@
+FROM node:20-bookworm-slim AS build
+
+ARG DBT_UI_REPOSITORY=https://github.com/EricLamphere/dbt-ui.git
+ARG DBT_UI_COMMIT=1fe89c5d023cd4d7a88642091c303a75839534f9
+
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends ca-certificates git \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN git init -q /opt/dbt-ui \
+    && git -C /opt/dbt-ui remote add origin "${DBT_UI_REPOSITORY}" \
+    && git -C /opt/dbt-ui fetch --depth 1 origin "${DBT_UI_COMMIT}" \
+    && git -C /opt/dbt-ui checkout --detach FETCH_HEAD
+
+WORKDIR /opt/dbt-ui/frontend
+RUN npm ci && npm run build
+
+FROM nginx:1.27-alpine
+COPY dbt-ui.nginx.conf /etc/nginx/conf.d/default.conf
+COPY --from=build /opt/dbt-ui/frontend/dist /usr/share/nginx/html
+EXPOSE 8080

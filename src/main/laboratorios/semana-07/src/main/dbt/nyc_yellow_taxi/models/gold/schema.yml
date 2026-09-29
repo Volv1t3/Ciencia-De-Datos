@@ -1,0 +1,121 @@
+version: 2
+
+# Gold contracts are enforced with dbt tests. Snowflake standard-table PK/FK
+# declarations are informational, whereas these tests validate actual rows.
+models:
+  - name: dim_date
+    description: Role-playing calendar dimension used for pickup and dropoff dates.
+    columns:
+      - name: date_key
+        description: Integer YYYYMMDD primary key.
+        data_tests: [unique, not_null]
+      - name: full_date
+        data_tests: [unique, not_null]
+
+  - name: dim_vendor
+    description: TLC TPEP provider codes and descriptions, including NOT_REPORTED.
+    columns:
+      - name: vendor_key
+        data_tests: [unique, not_null]
+
+  - name: dim_rate_code
+    description: Final TLC rate code descriptions, including code 99 for null/unknown.
+    columns:
+      - name: rate_code_key
+        data_tests: [unique, not_null]
+
+  - name: dim_store_and_forward
+    description: Store-and-forward domain with Y, N, and NOT_REPORTED members.
+    columns:
+      - name: store_and_fwd_key
+        data_tests: [unique, not_null]
+
+  - name: dim_payment_type
+    description: Payment-type code descriptions, including NOT_REPORTED.
+    columns:
+      - name: payment_type_key
+        data_tests: [unique, not_null]
+
+  - name: dim_location
+    description: Official TLC taxi-zone lookup used as both pickup and dropoff dimension.
+    columns:
+      - name: location_key
+        data_tests: [unique, not_null]
+      - name: location_id
+        data_tests: [unique, not_null]
+
+  - name: dim_source_file
+    description: Deduplicated Bronze/Kestra file provenance for Gold trip facts.
+    columns:
+      - name: source_file_key
+        data_tests: [unique, not_null]
+
+  - name: fct_yellow_taxi_trip
+    description: >-
+      Atomic trip fact: one valid, de-duplicated Silver Yellow Taxi trip per trip_id.
+      Contains additive trip/financial measures, role-playing dimensional keys, and
+      audit lineage for Silver imputations and normalization decisions.
+    columns:
+      - name: trip_id
+        description: Degenerate primary key inherited from the de-duplicated Silver trip.
+        data_tests: [unique, not_null]
+      - name: pickup_date_key
+        data_tests:
+          - not_null
+          - relationships:
+              arguments: {to: ref('dim_date'), field: date_key}
+      - name: dropoff_date_key
+        data_tests:
+          - not_null
+          - relationships:
+              arguments: {to: ref('dim_date'), field: date_key}
+      - name: vendor_key
+        data_tests:
+          - not_null
+          - relationships:
+              arguments: {to: ref('dim_vendor'), field: vendor_key}
+      - name: rate_code_key
+        data_tests:
+          - not_null
+          - relationships:
+              arguments: {to: ref('dim_rate_code'), field: rate_code_key}
+      - name: store_and_fwd_key
+        data_tests:
+          - not_null
+          - relationships:
+              arguments: {to: ref('dim_store_and_forward'), field: store_and_fwd_key}
+      - name: pickup_location_key
+        data_tests:
+          - not_null
+          - relationships:
+              arguments: {to: ref('dim_location'), field: location_key}
+      - name: dropoff_location_key
+        data_tests:
+          - not_null
+          - relationships:
+              arguments: {to: ref('dim_location'), field: location_key}
+      - name: payment_type_key
+        data_tests:
+          - not_null
+          - relationships:
+              arguments: {to: ref('dim_payment_type'), field: payment_type_key}
+      - name: source_file_key
+        data_tests:
+          - not_null
+          - relationships:
+              arguments: {to: ref('dim_source_file'), field: source_file_key}
+      - name: trip_count
+        description: Additive helper metric with constant value 1 for every trip fact.
+        data_tests: [not_null]
+      - name: passenger_count_imputed_trip_count
+        description: Additive 0/1 helper metric for imputation-rate calculations.
+        data_tests: [not_null]
+      - name: rate_code_unknown_trip_count
+        description: Additive 0/1 helper metric for official rate-code-99 analysis.
+        data_tests: [not_null]
+      - name: airport_fee_missing_trip_count
+        description: Additive 0/1 helper metric; it records an unknown source fee, not zero.
+        data_tests: [not_null]
+      - name: congestion_surcharge_missing_trip_count
+        description: Additive 0/1 helper metric; it records an unknown source fee, not zero.
+        data_tests: [not_null]

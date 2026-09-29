@@ -1,0 +1,17 @@
+# Credentials are supplied by environment variables. Never commit literal
+# Snowflake credentials in this profile or dbt project files.
+nyc_yellow_taxi:
+  target: dev
+  outputs:
+    dev:
+      type: snowflake
+      account: "{{ env_var('SNOWFLAKE_ACCOUNT') }}"
+      user: "{{ env_var('SNOWFLAKE_USER') }}"
+      password: "{{ env_var('SNOWFLAKE_PASSWORD') }}"
+      role: "{{ env_var('SNOWFLAKE_ROLE') }}"
+      warehouse: "{{ env_var('SNOWFLAKE_WAREHOUSE') }}"
+      database: "{{ env_var('SNOWFLAKE_DATABASE') }}"
+      schema: "{{ env_var('SNOWFLAKE_SCHEMA', 'S_CDATOS_SILVER') }}"
+      # Configurable dbt parallelism with a conservative local default.
+      threads: "{{ env_var('DBT_SNOWFLAKE_THREADS', '4') | as_number }}"
+      client_session_keep_alive: false

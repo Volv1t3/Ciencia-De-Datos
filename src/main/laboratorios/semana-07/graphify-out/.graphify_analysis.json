@@ -1,0 +1,78 @@
+{
+  "communities": {
+    "0": [
+      "hashlib",
+      "itertools",
+      "os",
+      "src_main_kestra_scripts_download_parquet",
+      "src_main_kestra_scripts_download_parquet_rationale_2",
+      "sys",
+      "time",
+      "urllib_error",
+      "urllib_request"
+    ],
+    "1": [
+      "argparse",
+      "base64",
+      "pathlib",
+      "src_main_kestra_encode_snowflake_secrets",
+      "src_main_kestra_encode_snowflake_secrets_main",
+      "src_main_kestra_encode_snowflake_secrets_parse_env",
+      "src_main_kestra_encode_snowflake_secrets_py_path",
+      "src_main_kestra_encode_snowflake_secrets_rationale_2"
+    ],
+    "2": [
+      "src_main_kestra_scripts_download_parquet_download_once",
+      "src_main_kestra_scripts_download_parquet_main",
+      "src_main_kestra_scripts_download_parquet_py_path",
+      "src_main_kestra_scripts_download_parquet_validate_parquet_file"
+    ]
+  },
+  "cohesion": {
+    "0": 0.2222222222222222,
+    "1": 0.2857142857142857,
+    "2": 0.6666666666666666
+  },
+  "gods": [
+    {
+      "id": "src_main_kestra_encode_snowflake_secrets_parse_env",
+      "label": "parse_env()",
+      "degree": 3
+    },
+    {
+      "id": "src_main_kestra_scripts_download_parquet_download_once",
+      "label": "download_once()",
+      "degree": 3
+    },
+    {
+      "id": "src_main_kestra_scripts_download_parquet_validate_parquet_file",
+      "label": "validate_parquet_file()",
+      "degree": 3
+    },
+    {
+      "id": "src_main_kestra_scripts_download_parquet_main",
+      "label": "main()",
+      "degree": 3
+    },
+    {
+      "id": "src_main_kestra_encode_snowflake_secrets_main",
+      "label": "main()",
+      "degree": 2
+    },
+    {
+      "id": "src_main_kestra_encode_snowflake_secrets_rationale_2",
+      "label": "Print Kestra OSS base64 secret variables from raw SNOWFLAKE_* .env values. This\u2026",
+      "degree": 1
+    },
+    {
+      "id": "src_main_kestra_scripts_download_parquet_rationale_2",
+      "label": "Download one NYC TLC Parquet source atomically and validate its envelope. This\u2026",
+      "degree": 1
+    }
+  ],
+  "surprises": [],
+  "tokens": {
+    "input": 0,
+    "output": 0
+  }
+}

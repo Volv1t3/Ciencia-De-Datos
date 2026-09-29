@@ -1,0 +1,26 @@
+# dbt project namespace and release marker.
+name: nyc_yellow_taxi
+version: "1.0.0"
+config-version: 2
+profile: nyc_yellow_taxi
+
+model-paths: ["models"]
+macro-paths: ["macros"]
+test-paths: ["tests"]
+clean-targets: ["target", "dbt_packages"]
+
+models:
+  nyc_yellow_taxi:
+    silver:
+      # Default for Silver models. Models that need persisted storage declare an
+      # explicit materialization in their own SQL file.
+      +materialized: view
+      +schema: S_CDATOS_SILVER
+    gold:
+      +materialized: table
+      +schema: S_CDATOS_GOLD
+
+seeds:
+  nyc_yellow_taxi:
+    # The official TLC zone lookup is a conformed Gold reference dataset.
+    +schema: S_CDATOS_GOLD

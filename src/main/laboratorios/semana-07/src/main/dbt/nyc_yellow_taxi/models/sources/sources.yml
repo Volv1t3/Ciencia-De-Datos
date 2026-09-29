@@ -1,0 +1,25 @@
+version: 2
+
+sources:
+  - name: bronze
+    description: NYC TLC Yellow Taxi Parquet data loaded into Snowflake by Kestra.
+    # Resolve database at runtime so this source definition is portable.
+    database: "{{ env_var('SNOWFLAKE_DATABASE') }}"
+    schema: S_CDATOS_BRONZE
+    tables:
+      - name: yellow_taxi_trips_raw
+        identifier: YELLOW_TAXI_TRIPS_RAW
+        description: Source-faithful Parquet rows in VARIANT, with Kestra load metadata.
+        columns:
+          - name: SOURCE_MONTH
+            description: TLC source file month (YYYY-MM).
+          - name: SOURCE_FILE
+            description: Snowflake staged source file path.
+          - name: SOURCE_ROW_NUMBER
+            description: Snowflake row ordinal in the staged Parquet file.
+          - name: SOURCE_CONTENT_KEY
+            description: Snowflake content key for the staged file.
+          - name: RAW_RECORD
+            description: Original Parquet record preserved as VARIANT.
+          - name: LOADED_AT
+            description: Timestamp of the first insert or source-content update.

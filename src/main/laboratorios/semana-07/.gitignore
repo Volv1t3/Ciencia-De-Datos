@@ -1,0 +1,10 @@
+/src/res/env/.env
+/src/res/data/raw/*
+!/src/res/data/raw/.gitkeep
+/src/res/logs/kestra/*
+!/src/res/logs/kestra/.gitkeep
+/src/res/logs/dbt/*
+!/src/res/logs/dbt/.gitkeep
+/src/main/dbt/**/target/
+/src/main/dbt/**/dbt_packages/
+/src/main/dbt/**/logs/

@@ -1,0 +1,153 @@
+name: semana-07-nyc-yellow-taxi
+
+x-dbt-backend-build: &dbt-backend-build
+  context: ./src/res/docker/custom-images
+  dockerfile: Dockerfile.dbt-backend
+  args:
+    DBT_UI_COMMIT: ${DBT_UI_COMMIT:-1fe89c5d023cd4d7a88642091c303a75839534f9}
+    DBT_CORE_VERSION: "1.12.5"
+    DBT_DUCKDB_VERSION: "1.11.0"
+    DBT_SNOWFLAKE_VERSION: "1.12.1"
+
+x-dbt-environment: &dbt-environment
+  DBT_UI_HOST: 0.0.0.0
+  DBT_UI_PORT: "8001"
+  DBT_UI_PROJECTS_PATH: /workspace/dbt-projects
+  DBT_UI_DATA_DIR: /var/lib/dbt-ui
+  DBT_PROFILES_DIR: /home/dbtui/.dbt
+  DBT_LOG_PATH: /var/log/dbt
+  SNOWFLAKE_ACCOUNT: ${SNOWFLAKE_ACCOUNT:-}
+  SNOWFLAKE_USER: ${SNOWFLAKE_USER:-}
+  SNOWFLAKE_PASSWORD: ${SNOWFLAKE_PASSWORD:-}
+  SNOWFLAKE_ROLE: ${SNOWFLAKE_ROLE:-}
+  SNOWFLAKE_WAREHOUSE: ${SNOWFLAKE_WAREHOUSE:-}
+  SNOWFLAKE_DATABASE: ${SNOWFLAKE_DATABASE:-}
+  SNOWFLAKE_SCHEMA: ${SNOWFLAKE_SCHEMA:-S_CDATOS_SILVER}
+  DBT_SNOWFLAKE_THREADS: ${DBT_SNOWFLAKE_THREADS:-4}
+
+x-dbt-volumes: &dbt-volumes
+  - ./src/main/dbt:/workspace/dbt-projects
+  - ./src/res/config/dbt/profiles:/home/dbtui/.dbt:ro
+  - dbt_ui_data:/var/lib/dbt-ui
+  - ./src/res/logs/dbt:/var/log/dbt
+
+services:
+  kestra-postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: ${KESTRA_POSTGRES_DB:?set KESTRA_POSTGRES_DB in src/res/env/.env}
+      POSTGRES_USER: ${KESTRA_POSTGRES_USER:?set KESTRA_POSTGRES_USER in src/res/env/.env}
+      POSTGRES_PASSWORD: ${KESTRA_POSTGRES_PASSWORD:?set KESTRA_POSTGRES_PASSWORD in src/res/env/.env}
+    volumes:
+      - kestra_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+    networks: [data-platform]
+
+  kestra:
+    image: kestra/kestra:v1.3.40
+    user: root
+    command: ["server", "standalone", "--config", "/etc/kestra/application.yml"]
+    environment:
+      ENV_KESTRA_DATABASE_HOST: kestra-postgres
+      ENV_KESTRA_DATABASE_PORT: "5432"
+      ENV_KESTRA_DATABASE: ${KESTRA_POSTGRES_DB:?set KESTRA_POSTGRES_DB in src/res/env/.env}
+      ENV_KESTRA_USERNAME: ${KESTRA_POSTGRES_USER:?set KESTRA_POSTGRES_USER in src/res/env/.env}
+      ENV_KESTRA_PASSWORD: ${KESTRA_POSTGRES_PASSWORD:?set KESTRA_POSTGRES_PASSWORD in src/res/env/.env}
+      ENV_KESTRA_PUBLIC_URL: http://localhost:${KESTRA_PORT:-40770}/
+      ENV_KESTRA_BASIC_AUTH_USERNAME: ${KESTRA_BASIC_AUTH_USERNAME:?set KESTRA_BASIC_AUTH_USERNAME in src/res/env/.env}
+      ENV_KESTRA_BASIC_AUTH_PASSWORD: ${KESTRA_BASIC_AUTH_PASSWORD:?set KESTRA_BASIC_AUTH_PASSWORD in src/res/env/.env}
+      ENV_SNOWFLAKE_ACCOUNT: ${SNOWFLAKE_ACCOUNT:-}
+      ENV_SNOWFLAKE_USER: ${SNOWFLAKE_USER:-}
+      ENV_SNOWFLAKE_PASSWORD: ${SNOWFLAKE_PASSWORD:-}
+      ENV_SNOWFLAKE_ROLE: ${SNOWFLAKE_ROLE:-}
+      ENV_SNOWFLAKE_WAREHOUSE: ${SNOWFLAKE_WAREHOUSE:-}
+      ENV_SNOWFLAKE_DATABASE: ${SNOWFLAKE_DATABASE:-}
+      ENV_SNOWFLAKE_SCHEMA: ${SNOWFLAKE_SCHEMA:-S_CDATOS_BRONZE}
+      SECRET_SNOWFLAKE_ACCOUNT: ${SECRET_SNOWFLAKE_ACCOUNT:?generate with encode_snowflake_secrets.py and add to src/res/env/.env}
+      SECRET_SNOWFLAKE_USER: ${SECRET_SNOWFLAKE_USER:?generate with encode_snowflake_secrets.py and add to src/res/env/.env}
+      SECRET_SNOWFLAKE_PASSWORD: ${SECRET_SNOWFLAKE_PASSWORD:?generate with encode_snowflake_secrets.py and add to src/res/env/.env}
+      SECRET_SNOWFLAKE_ROLE: ${SECRET_SNOWFLAKE_ROLE:?generate with encode_snowflake_secrets.py and add to src/res/env/.env}
+      SECRET_SNOWFLAKE_WAREHOUSE: ${SECRET_SNOWFLAKE_WAREHOUSE:?generate with encode_snowflake_secrets.py and add to src/res/env/.env}
+    ports:
+      - "127.0.0.1:${KESTRA_PORT:-40770}:8080"
+      - "127.0.0.1:${KESTRA_MANAGEMENT_PORT:-40771}:8081"
+    volumes:
+      - ./src/res/config/kestra/application.yml:/etc/kestra/application.yml:ro
+      - ./src/main/kestra:/workspace/kestra:ro
+      # Keep multi-megabyte Parquet files inside Docker's Linux filesystem.
+      # Docker Desktop bind mounts can intermittently corrupt large writes from
+      # Kestra's Process runner before the Snowflake JDBC PUT reads them.
+      - kestra_raw_data:/workspace/data/raw
+      - ./src/res/logs/kestra:/tmp/kestra-wd
+      - kestra_internal_storage:/app/storage
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      kestra-postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "--show-error", "--output", "/dev/null", "http://localhost:8081/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    restart: unless-stopped
+    networks: [data-platform]
+
+  dbt-ui-backend:
+    image: semana07-dbt-ui-backend:1fe89c5
+    build: *dbt-backend-build
+    environment: *dbt-environment
+    volumes: *dbt-volumes
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/api/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    restart: unless-stopped
+    networks: [data-platform]
+
+  dbt-ui:
+    build:
+      context: ./src/res/docker/custom-images
+      dockerfile: Dockerfile.dbt-frontend
+      args:
+        DBT_UI_COMMIT: ${DBT_UI_COMMIT:-1fe89c5d023cd4d7a88642091c303a75839534f9}
+    ports:
+      - "127.0.0.1:${DBT_UI_PORT:-40772}:8080"
+    depends_on:
+      dbt-ui-backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1:8080/"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+    networks: [data-platform]
+
+  dbt-core:
+    profiles: [dbt-cli]
+    image: semana07-dbt-ui-backend:1fe89c5
+    build: *dbt-backend-build
+    entrypoint: ["/opt/dbt-ui/backend/.venv/bin/dbt"]
+    command: ["--version"]
+    working_dir: /workspace/dbt-projects/nyc_yellow_taxi
+    environment: *dbt-environment
+    volumes: *dbt-volumes
+    networks: [data-platform]
+
+volumes:
+  kestra_postgres_data:
+  kestra_internal_storage:
+  kestra_raw_data:
+  dbt_ui_data:
+
+networks:
+  data-platform:
+    driver: bridge

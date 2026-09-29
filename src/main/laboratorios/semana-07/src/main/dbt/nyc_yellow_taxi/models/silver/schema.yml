@@ -1,0 +1,121 @@
+version: 2
+
+# Descriptions document intent; data_tests make the source-key, lineage, and
+# required-field promises executable during dbt build.
+models:
+  - name: stg_yellow_taxi_trips
+    description: >-
+      Typed and source-key de-duplicated projection of the source-faithful Bronze
+      VARIANT rows. This model intentionally retains rows before Silver validity rules.
+
+  - name: silver_yellow_taxi_trips
+    description: >-
+      Clean Yellow Taxi trips. Rows without usable pickup/dropoff timestamps, with
+      reversed timestamps, invalid TLC taxi-zone IDs, or negative passenger/distance
+      measures are excluded. Missing RatecodeID values are normalized to TLC's
+      official unknown code 99; missing store-and-forward flags are normalized
+      to NOT_REPORTED. Missing financial fees remain null, never inferred as zero.
+    columns:
+      - name: trip_id
+        description: SHA-256 surrogate key derived from the Bronze month and source row number.
+        data_tests:
+          - unique
+          - not_null
+      - name: source_month
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('silver_taxi_months')
+                field: source_month
+      - name: source_row_number
+        data_tests:
+          - not_null
+      - name: source_loaded_at
+        data_tests:
+          - not_null
+      - name: passenger_count
+        description: Reported positive passenger count or a documented peer-group mode imputation.
+        data_tests:
+          - not_null
+      - name: rate_code_id_observed
+        description: Original parsed RatecodeID before normalization; null means the source did not report it.
+      - name: rate_code_id
+        description: Final RatecodeID. Source nulls become TLC's official unknown/null code 99.
+        data_tests:
+          - not_null
+      - name: rate_code_id_was_missing
+        description: True when RatecodeID was null in the source before mapping to 99.
+        data_tests:
+          - not_null
+      - name: store_and_fwd_flag_observed
+        description: Original normalized Y/N/null store-and-forward source value before semantic normalization.
+      - name: store_and_fwd_flag
+        description: Y, N, or NOT_REPORTED. NOT_REPORTED represents unavailable source data, not an inferred Y/N value.
+        data_tests:
+          - not_null
+      - name: store_and_fwd_flag_was_missing
+        description: True when the store-and-forward source value was null.
+        data_tests:
+          - not_null
+      - name: congestion_surcharge_amount_observed
+        description: Original parsed congestion surcharge; null is retained as unknown rather than imputed to zero.
+      - name: congestion_surcharge_was_missing
+        description: True when congestion surcharge was absent in the source.
+        data_tests:
+          - not_null
+      - name: airport_fee_amount_observed
+        description: Original parsed airport fee; null is retained as unknown rather than imputed to zero.
+      - name: airport_fee_was_missing
+        description: True when airport fee was absent in the source.
+        data_tests:
+          - not_null
+      - name: pickup_datetime
+        data_tests:
+          - not_null
+      - name: dropoff_datetime
+        data_tests:
+          - not_null
+      - name: pickup_location_id
+        data_tests:
+          - not_null
+      - name: dropoff_location_id
+        data_tests:
+          - not_null
+
+  - name: silver_taxi_months
+    description: One row per source month with valid-trip and Bronze-load observability metrics.
+    columns:
+      - name: source_month
+        data_tests:
+          - unique
+          - not_null
+      - name: valid_trip_count
+        data_tests:
+          - not_null
+
+  - name: silver_yellow_taxi_null_profile
+    description: Source-month null counts and rates before Silver curation.
+    columns:
+      - name: source_month
+        data_tests:
+          - not_null
+      - name: column_name
+        data_tests:
+          - not_null
+      - name: null_count
+        data_tests:
+          - not_null
+
+  - name: silver_yellow_taxi_null_correlations
+    description: Pairwise co-missingness and conditional null probabilities before Silver curation.
+    columns:
+      - name: source_month
+        data_tests:
+          - not_null
+      - name: left_column_name
+        data_tests:
+          - not_null
+      - name: right_column_name
+        data_tests:
+          - not_null

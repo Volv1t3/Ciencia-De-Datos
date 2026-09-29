@@ -1,0 +1,170 @@
+id: bronze_ingestion
+namespace: nyc_yellow_taxi
+description: >-
+  Download official TLC Yellow Taxi Parquet files for 2025 and January-August
+  2026, stage them in Snowflake, and merge source-faithful rows into Bronze.
+
+tasks:
+  - id: create_parquet_file_format
+    type: io.kestra.plugin.jdbc.snowflake.Query
+    url: "jdbc:snowflake://{{ secret('SNOWFLAKE_ACCOUNT') }}.snowflakecomputing.com"
+    username: "{{ secret('SNOWFLAKE_USER') }}"
+    password: "{{ secret('SNOWFLAKE_PASSWORD') }}"
+    role: "{{ secret('SNOWFLAKE_ROLE') }}"
+    warehouse: "{{ secret('SNOWFLAKE_WAREHOUSE') }}"
+    database: S_CDATOS_LABORATORIOINT
+    schema: S_CDATOS_BRONZE
+    queryTag: "kestra-bronze-ingestion-{{ execution.id }}"
+    connectionPooling: false
+    sql: |
+      CREATE FILE FORMAT IF NOT EXISTS S_CDATOS_LABORATORIOINT.S_CDATOS_BRONZE.YELLOW_TAXI_PARQUET_FORMAT TYPE = PARQUET
+
+  - id: create_yellow_taxi_stage
+    type: io.kestra.plugin.jdbc.snowflake.Query
+    url: "jdbc:snowflake://{{ secret('SNOWFLAKE_ACCOUNT') }}.snowflakecomputing.com"
+    username: "{{ secret('SNOWFLAKE_USER') }}"
+    password: "{{ secret('SNOWFLAKE_PASSWORD') }}"
+    role: "{{ secret('SNOWFLAKE_ROLE') }}"
+    warehouse: "{{ secret('SNOWFLAKE_WAREHOUSE') }}"
+    database: S_CDATOS_LABORATORIOINT
+    schema: S_CDATOS_BRONZE
+    queryTag: "kestra-bronze-ingestion-{{ execution.id }}"
+    connectionPooling: false
+    sql: |
+      CREATE STAGE IF NOT EXISTS S_CDATOS_LABORATORIOINT.S_CDATOS_BRONZE.YELLOW_TAXI_STAGE FILE_FORMAT = S_CDATOS_LABORATORIOINT.S_CDATOS_BRONZE.YELLOW_TAXI_PARQUET_FORMAT
+
+  - id: create_bronze_table
+    type: io.kestra.plugin.jdbc.snowflake.Query
+    url: "jdbc:snowflake://{{ secret('SNOWFLAKE_ACCOUNT') }}.snowflakecomputing.com"
+    username: "{{ secret('SNOWFLAKE_USER') }}"
+    password: "{{ secret('SNOWFLAKE_PASSWORD') }}"
+    role: "{{ secret('SNOWFLAKE_ROLE') }}"
+    warehouse: "{{ secret('SNOWFLAKE_WAREHOUSE') }}"
+    database: S_CDATOS_LABORATORIOINT
+    schema: S_CDATOS_BRONZE
+    queryTag: "kestra-bronze-ingestion-{{ execution.id }}"
+    connectionPooling: false
+    sql: |
+      CREATE TABLE IF NOT EXISTS S_CDATOS_LABORATORIOINT.S_CDATOS_BRONZE.YELLOW_TAXI_TRIPS_RAW (
+        SOURCE_MONTH VARCHAR(7) NOT NULL,
+        SOURCE_FILE VARCHAR NOT NULL,
+        SOURCE_ROW_NUMBER NUMBER(38, 0) NOT NULL,
+        SOURCE_CONTENT_KEY VARCHAR,
+        RAW_RECORD VARIANT NOT NULL,
+        LOADED_AT TIMESTAMP_TZ NOT NULL
+      )
+
+  - id: months
+    type: io.kestra.plugin.core.flow.ForEach
+    concurrencyLimit: 1
+    values:
+      - '2025-01'
+      - '2025-02'
+      - '2025-03'
+      - '2025-04'
+      - '2025-05'
+      - '2025-06'
+      - '2025-07'
+      - '2025-08'
+      - '2025-09'
+      - '2025-10'
+      - '2025-11'
+      - '2025-12'
+      - '2026-01'
+      - '2026-02'
+      - '2026-03'
+      - '2026-04'
+      - '2026-05'
+      - '2026-06'
+      - '2026-07'
+      - '2026-08'
+    tasks:
+      - id: probe_source
+        type: io.kestra.plugin.core.http.Request
+        method: HEAD
+        uri: "https://d37ci6vzurychx.cloudfront.net/trip-data/yellow_tripdata_{{ taskrun.value }}.parquet"
+        options:
+          allowFailed: true
+
+      - id: require_source_or_pending_august
+        type: io.kestra.plugin.core.execution.Assert
+        conditions:
+          - "{{ outputs.probe_source[taskrun.value].code == 200 or (taskrun.value == '2026-08' and outputs.probe_source[taskrun.value].code == 404) }}"
+        errorMessage: "A required TLC Parquet source is unavailable, or the source probe returned an unexpected status."
+
+      - id: source_available
+        type: io.kestra.plugin.core.flow.If
+        condition: "{{ outputs.probe_source[taskrun.value].code == 200 }}"
+        then:
+          # The HTTP Download plugin writes through Kestra internal storage.
+          # Download to the persistent host mount instead, then stage with
+          # Snowflake JDBC PUT below. This avoids a Docker Desktop EIO emitted
+          # when that plugin closes large internal-storage files.
+          - id: download_parquet
+            type: io.kestra.plugin.scripts.shell.Commands
+            taskRunner:
+              type: io.kestra.plugin.core.runner.Process
+            commands:
+              - |
+                set -eu
+                target="/workspace/data/raw/yellow_tripdata_{{ parent.taskrun.value }}.parquet"
+                python3 /workspace/kestra/scripts/download_parquet.py \
+                  "https://d37ci6vzurychx.cloudfront.net/trip-data/yellow_tripdata_{{ parent.taskrun.value }}.parquet" \
+                  "$target" \
+                  0
+
+          - id: upload_parquet
+            type: io.kestra.plugin.jdbc.snowflake.Query
+            url: "jdbc:snowflake://{{ secret('SNOWFLAKE_ACCOUNT') }}.snowflakecomputing.com"
+            username: "{{ secret('SNOWFLAKE_USER') }}"
+            password: "{{ secret('SNOWFLAKE_PASSWORD') }}"
+            role: "{{ secret('SNOWFLAKE_ROLE') }}"
+            warehouse: "{{ secret('SNOWFLAKE_WAREHOUSE') }}"
+            database: S_CDATOS_LABORATORIOINT
+            schema: S_CDATOS_BRONZE
+            queryTag: "kestra-bronze-ingestion-{{ execution.id }}"
+            connectionPooling: false
+            sql: |
+              PUT file:///workspace/data/raw/yellow_tripdata_{{ parent.taskrun.value }}.parquet
+                @S_CDATOS_LABORATORIOINT.S_CDATOS_BRONZE.YELLOW_TAXI_STAGE/monthly/{{ parent.taskrun.value }}
+                AUTO_COMPRESS = FALSE
+                OVERWRITE = TRUE
+
+          - id: merge_bronze
+            type: io.kestra.plugin.jdbc.snowflake.Query
+            url: "jdbc:snowflake://{{ secret('SNOWFLAKE_ACCOUNT') }}.snowflakecomputing.com"
+            username: "{{ secret('SNOWFLAKE_USER') }}"
+            password: "{{ secret('SNOWFLAKE_PASSWORD') }}"
+            role: "{{ secret('SNOWFLAKE_ROLE') }}"
+            warehouse: "{{ secret('SNOWFLAKE_WAREHOUSE') }}"
+            database: S_CDATOS_LABORATORIOINT
+            schema: S_CDATOS_BRONZE
+            queryTag: "kestra-bronze-ingestion-{{ execution.id }}"
+            connectionPooling: false
+            sql: |
+              MERGE INTO S_CDATOS_LABORATORIOINT.S_CDATOS_BRONZE.YELLOW_TAXI_TRIPS_RAW AS target
+              USING (
+                SELECT
+                  '{{ parent.taskrun.value }}' AS source_month,
+                  METADATA$FILENAME AS source_file,
+                  METADATA$FILE_ROW_NUMBER AS source_row_number,
+                  METADATA$FILE_CONTENT_KEY AS source_content_key,
+                  $1 AS raw_record,
+                  CURRENT_TIMESTAMP() AS loaded_at
+                FROM @S_CDATOS_LABORATORIOINT.S_CDATOS_BRONZE.YELLOW_TAXI_STAGE/monthly/{{ parent.taskrun.value }}/yellow_tripdata_{{ parent.taskrun.value }}.parquet
+              ) AS source
+              ON target.SOURCE_MONTH = source.source_month
+                 AND target.SOURCE_ROW_NUMBER = source.source_row_number
+              WHEN MATCHED AND target.SOURCE_CONTENT_KEY IS DISTINCT FROM source.source_content_key THEN UPDATE SET
+                target.SOURCE_FILE = source.source_file,
+                target.SOURCE_CONTENT_KEY = source.source_content_key,
+                target.RAW_RECORD = source.raw_record,
+                target.LOADED_AT = source.loaded_at
+              WHEN NOT MATCHED THEN INSERT
+                (SOURCE_MONTH, SOURCE_FILE, SOURCE_ROW_NUMBER, SOURCE_CONTENT_KEY, RAW_RECORD, LOADED_AT)
+                VALUES
+                (source.source_month, source.source_file, source.source_row_number, source.source_content_key, source.raw_record, source.loaded_at)
+        else:
+          - id: august_pending
+            type: io.kestra.plugin.core.log.Log
+            message: "TLC has not published Yellow Taxi 2026-08 yet; rerun this flow after publication."
