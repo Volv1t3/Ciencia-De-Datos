@@ -1,0 +1,19 @@
+{
+  "argv": [
+    "/usr/bin/python3",
+    "-m",
+    "ipykernel_launcher",
+    "-f",
+    "{connection_file}"
+  ],
+  "display_name": "PySpark 4 + Snowflake",
+  "language": "python",
+  "metadata": {
+    "debugger": true
+  },
+  "env": {
+    "SPARK_HOME": "/opt/spark",
+    "PYSPARK_PYTHON": "/usr/bin/python3",
+    "PYTHONPATH": "/opt/spark/python:/opt/spark/python/lib/py4j-0.10.9.9-src.zip:/opt/spark/lib"
+  }
+}

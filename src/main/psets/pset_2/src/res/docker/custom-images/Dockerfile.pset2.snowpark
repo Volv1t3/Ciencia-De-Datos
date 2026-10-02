@@ -1,0 +1,135 @@
+# ============================================================
+# PSet 2 - Spark / Snowpark Connect execution image
+#
+# Runtime stack:
+#   Python          3.11
+#   Java            OpenJDK 17
+#   Apache Spark    3.5.6
+#   PySpark         3.5.6
+#   Snowpark Connect 1.44.0
+#
+# Heavy Spark DataFrame execution is performed by Snowflake
+# through Snowpark Connect. The local Spark installation is
+# retained for Spark tooling, API compatibility and development.
+# ============================================================
+
+FROM python:3.11-slim-bookworm
+
+USER root
+
+ARG SPARK_VERSION=3.5.6
+ARG HADOOP_PROFILE=hadoop3
+ARG SNOWPARK_CONNECT_VERSION=1.44.0
+
+# ------------------------------------------------------------
+# Base runtime dependencies
+# ------------------------------------------------------------
+
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends \
+        openjdk-17-jre-headless \
+        curl \
+        ca-certificates \
+        procps \
+        tini \
+    && rm -rf /var/lib/apt/lists/*
+
+# ------------------------------------------------------------
+# Stable JAVA_HOME independent of amd64 / arm64 path naming
+# ------------------------------------------------------------
+
+RUN mkdir -p /opt/java \
+    && ln -s \
+       "$(dirname "$(dirname "$(readlink -f "$(command -v java)")")")" \
+       /opt/java/openjdk
+
+ENV JAVA_HOME=/opt/java/openjdk
+
+# ------------------------------------------------------------
+# Apache Spark 3.5.6
+#
+# Spark 3.5.x standard Hadoop distribution uses Scala 2.12,
+# matching the Spark generation expected by Snowpark Connect.
+# ------------------------------------------------------------
+
+RUN curl --fail --location --silent --show-error \
+      "https://archive.apache.org/dist/spark/spark-${SPARK_VERSION}/spark-${SPARK_VERSION}-bin-${HADOOP_PROFILE}.tgz" \
+      --output /tmp/spark.tgz \
+    && tar -xzf /tmp/spark.tgz -C /opt \
+    && ln -s \
+       "/opt/spark-${SPARK_VERSION}-bin-${HADOOP_PROFILE}" \
+       /opt/spark \
+    && rm /tmp/spark.tgz
+
+ENV SPARK_HOME=/opt/spark
+ENV PATH="${SPARK_HOME}/bin:${SPARK_HOME}/sbin:${PATH}"
+
+# ------------------------------------------------------------
+# Python Spark / Snowflake environment
+#
+# PySpark is installed explicitly even though Spark itself
+# contains its Python libraries. Snowflake recommends the
+# explicit PySpark 3.5.6 package for Snowpark Connect
+# development and IDE/tooling compatibility.
+#
+# We already provide Java 17, so [jdk] is intentionally not
+# used on snowpark-connect to avoid installing another JDK.
+# ------------------------------------------------------------
+
+RUN python -m pip install --no-cache-dir --upgrade pip setuptools wheel \
+    && python -m pip install --no-cache-dir \
+        "pyspark==${SPARK_VERSION}" \
+        "snowpark-connect==${SNOWPARK_CONNECT_VERSION}"
+
+# ------------------------------------------------------------
+# Verify that the important runtime components were installed.
+# Does not connect to Snowflake during the image build.
+# ------------------------------------------------------------
+
+RUN java -version \
+    && spark-submit --version \
+    && python -c "import pyspark; print('PySpark:', pyspark.__version__)" \
+    && python -c "from snowflake import snowpark_connect; print('Snowpark Connect import: OK')"
+
+# ------------------------------------------------------------
+# Runtime environment
+# ------------------------------------------------------------
+
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
+
+ENV PYSPARK_PYTHON=/usr/local/bin/python
+ENV PYSPARK_DRIVER_PYTHON=/usr/local/bin/python
+
+# Snowpark Connect can be made more verbose temporarily when
+# debugging by overriding this variable in docker-compose.
+ENV SNOWPARK_CONNECT_VERBOSE=false
+
+# ------------------------------------------------------------
+# Non-root runtime user
+# ------------------------------------------------------------
+
+RUN useradd \
+      --uid 185 \
+      --create-home \
+      --shell /bin/bash \
+      spark \
+    && mkdir -p \
+      /opt/spark/work \
+      /opt/spark/logs \
+      /opt/spark/jobs \
+    && chown -R spark:spark \
+      /opt/spark/work \
+      /opt/spark/logs \
+      /opt/spark/jobs
+
+USER spark
+
+WORKDIR /opt/spark/work
+
+ENTRYPOINT ["/usr/bin/tini", "--"]
+
+# Persistent container for your existing development
+# infrastructure. Override this command when running a job
+# directly.
+CMD ["sleep", "infinity"]

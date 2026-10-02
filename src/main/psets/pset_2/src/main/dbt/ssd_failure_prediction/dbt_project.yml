@@ -11,8 +11,8 @@ clean-targets: ["target", "dbt_packages"]
 models:
   ssd_failure_prediction:
     silver:
-      +materialized: view
-      +schema: SILVER
+      +materialized: incremental
+      +schema: S_CDATOS_PSET2_SILVER
     gold:
-      +materialized: view
-      +schema: GOLD
+      +materialized: table
+      +schema: S_CDATOS_PSET2_GOLD

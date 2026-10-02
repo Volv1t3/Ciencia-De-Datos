@@ -14,10 +14,14 @@ RUN apt-get update \
       https://repo1.maven.org/maven2/net/snowflake/snowflake-jdbc/4.0.2/snowflake-jdbc-4.0.2.jar
 
 COPY config/spark/requirements.txt /tmp/requirements.txt
-RUN python3 -m pip install --no-cache-dir -r /tmp/requirements.txt \
+RUN /usr/bin/python3 -m pip install --no-cache-dir -r /tmp/requirements.txt \
+    && /usr/bin/python3 -c "import ipykernel, jupyterlab, pandas, pyarrow" \
     && rm /tmp/requirements.txt \
-    && mkdir -p /opt/spark/work /opt/spark/logs \
-    && chown -R spark:spark /opt/spark/work /opt/spark/logs
+    && mkdir -p /opt/spark/work /opt/spark/logs /opt/spark/notebooks \
+    && chown -R spark:spark /opt/spark/work /opt/spark/logs /opt/spark/notebooks
+
+COPY config/spark/kernels/pyspark-snowflake/kernel.json \
+    /usr/local/share/jupyter/kernels/pyspark-snowflake/kernel.json
 
 USER spark
 WORKDIR /opt/spark/work

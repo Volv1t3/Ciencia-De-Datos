@@ -1,24 +1,63 @@
 # Pset 2 — SSD failure prediction infrastructure
 
-This is a local, reproducible infrastructure layer for the future batch ELT
-pipeline. Kestra is the sole orchestrator; PostgreSQL is used only by Kestra.
+This project implements the complete SSD telemetry path from source-preserving
+Bronze ingestion through dbt Silver and Gold models to the production MC1
+one-big-table datasets. Kestra is the ingestion orchestrator, dbt owns the
+warehouse transformations, and Snowpark Connect executes the final wide-table
+feature engineering inside Snowflake. PostgreSQL is used only by Kestra;
 Snowflake remains external to Compose.
 
 For the file-by-file technical design, mounts, persistence model, and Snowflake
 bootstrap procedure, see [IMPLEMENTATION.md](IMPLEMENTATION.md).
 
-```text
-Alibaba Tianchi archives
-        │ (manual authenticated download)
-        ▼
-src/res/data/raw  ──read-only──► Kestra ──► Snowflake BRONZE
-                                             │
-                    dbt-ui / dbt Core ◄─────┘
-                           │
-                 Snowflake SILVER → GOLD
-                           │
-                    Spark local[*] → Snowflake OBT
+## Documentation map
+
+Start here, then follow the layer links in pipeline order:
+
+| Area | Documentation | What it explains |
+| --- | --- | --- |
+| Platform | [Infrastructure and persistence](IMPLEMENTATION.md) | Compose services, mounts, volumes, bootstrap, and operational boundaries. |
+| Bronze | [Kestra Bronze ingestion](src/main/kestra/flows/README.md) | Manual trigger rationale, source validation, retries, backfill, staging, and idempotent merge behavior. |
+| dbt | [dbt transformation project](src/main/dbt/ssd_failure_prediction/README.md) | Project structure, lineage, commands, materializations, and navigation into Silver and Gold. |
+| Silver | [Silver processing](src/main/dbt/ssd_failure_prediction/models/silver/README.md) | Baseline extraction, structural-null processing, MC1 specialization, audit quarantine, and final all-year tables. |
+| Gold | [Gold dimensional model](src/main/dbt/ssd_failure_prediction/models/gold/README.md) | Dimensions, facts, keys, relationships, and Silver-to-Gold column reconciliation. |
+| EDA | [Spark notebooks](src/main/python/spark/notebooks/README.md) | DataGrip/Jupyter execution, Snowflake pushdown, generated EDA notebooks, and packaged null analysis. |
+| EDA evidence | [Null-structure analysis book](src/main/python/spark/notebooks/ssd_null_analysis_book/README.md) | Reproducible notebooks, interpretation chapters, modeling policy, and packaged CSV evidence. |
+| OBT | [Snowpark Connect jobs](src/main/python/spark/jobs/README.md) | MC1 rolling features, labels, validation, audit, staging, and canonical publication. |
+| Runtimes | [Custom Docker images](src/res/docker/custom-images/README.md) | Spark/Jupyter and Snowpark Connect image composition and validation. |
+
+The assignment and implementation specifications remain versioned as supporting
+references under [`src/res/prompts`](src/res/prompts/).
+
+## End-to-end lineage
+
+```mermaid
+flowchart LR
+    A[Alibaba Tianchi ZIP archives] --> B[Kestra Bronze ingestion]
+    B --> C[(SMART_2018_RAW)]
+    B --> D[(SMART_2019_RAW)]
+    B --> E[(SSD_FAILURE_LABEL_RAW)]
+    C --> F[dbt baseline Silver]
+    D --> F
+    E --> F
+    F --> G[Silver null processing and MC1 specialization]
+    G --> H[(SMART_NULL_PROCESSED_ALL_YEARS)]
+    G --> I[(SMART_MC1_ALL_YEARS)]
+    H --> J[Gold dimensions and all-model facts]
+    I --> K[Gold MC1 facts]
+    J --> L[DIM_SSD and DIM_DATE]
+    K --> M[Snowpark Connect MC1 feature engineering]
+    L --> M
+    M --> N[(OBT_MC1_RN)]
+    M --> O[(OBT_MC1_R)]
+    M --> P[(OBT_MC1_N)]
+    F -. aggregated evidence .-> Q[Spark EDA notebooks]
+    Q --> G
 ```
+
+The source acquisition is manual because Alibaba does not expose a stable API,
+but every step after the ZIPs reach `src/res/data/raw` is automated and
+repeatable.
 
 ## Layout and persistence
 
@@ -54,21 +93,30 @@ storage intentionally remain Docker-managed persistent state.
 From this directory:
 
 ```bash
-cp .env.example .env
-# Edit .env: at minimum replace KESTRA_POSTGRES_PASSWORD.
+cp src/res/env/.env.example src/res/env/.env
+# Edit src/res/env/.env and replace every placeholder, including JUPYTER_TOKEN.
+# A suitable local token can be generated with: openssl rand -hex 32
 mkdir -p src/res/data/raw
 # Copy the three Tianchi archives into src/res/data/raw yourself.
 
-docker compose config
-docker compose build
-docker compose up -d
-docker compose ps
+docker compose --env-file src/res/env/.env config
+docker compose --env-file src/res/env/.env build
+docker compose --env-file src/res/env/.env up -d
+docker compose --env-file src/res/env/.env ps
 ```
 
 Open Kestra at <http://localhost:8080> and dbt-ui at
 <http://localhost:5173>. The configuration binds both to `127.0.0.1`, so they
 are not published to the local network. To use different ports, change
 `KESTRA_PORT`, `KESTRA_MANAGEMENT_PORT`, or `DBT_UI_PORT` in `src/res/env/.env`.
+
+JupyterLab is available at <http://127.0.0.1:4041> using `JUPYTER_TOKEN` from
+the private environment file. The Spark application UI is available at
+<http://127.0.0.1:4040> while a Spark session is running. Change
+`JUPYTER_PORT` or `SPARK_UI_PORT` if either host port is already occupied.
+DataGrip must connect to that remote Jupyter URL and use the
+`PySpark 4 + Snowflake` kernel; its local Python interpreter does not contain
+the container's Spark runtime or mounted connector helpers.
 
 Import `src/main/kestra/flows/bronze_ingestion.yml` in the Kestra UI
 (Flows → Create → Import). It validates and consolidates the selected CSV
@@ -92,19 +140,56 @@ docker compose exec dbt-ui-backend /opt/dbt-ui/backend/.venv/bin/dbt --version
 docker compose exec --workdir /workspace/dbt-projects/ssd_failure_prediction \
   dbt-ui-backend /opt/dbt-ui/backend/.venv/bin/dbt debug
 
-# Validate Spark runtime, local mode, and the installed connector
+# Validate Spark runtime, Jupyter, local mode, and the installed connector
 docker compose exec spark java -version
 docker compose exec spark python3 --version
-docker compose exec spark spark-submit --version
-docker compose exec spark spark-submit /opt/spark/jobs/build_obt.py
+docker compose exec spark python3 -m jupyterlab --version
+docker compose exec spark /opt/spark/bin/spark-submit --version
+docker compose exec spark /opt/spark/bin/spark-submit /opt/spark/jobs/build_obt.py
+
+# With valid SNOWFLAKE_* values, execute a small query in the configured warehouse
+docker compose exec spark /opt/spark/bin/spark-submit \
+  /opt/spark/jobs/check_snowflake_connection.py
 
 # Verify Kestra PostgreSQL persistence after a restart
 docker compose restart kestra-postgres kestra
 docker compose ps
 ```
 
-The Spark check does not contact Snowflake. `build_obt.py` only starts a local
-Spark session and confirms the connector class can be loaded.
+`build_obt.py` does not contact Snowflake; it only starts local Spark and checks
+connector discovery. `check_snowflake_connection.py` is the opt-in remote smoke
+test and reports the account, role, warehouse, database, and schema selected by
+the Snowflake session.
+
+The production MC1 OBT workload uses the separate `snowpark-connect` service
+and the dedicated high-compute warehouse rather than this local Spark runtime.
+Its bounded validation, development-stage, full publication, and test commands
+are documented in
+[`src/main/python/spark/jobs/README.md`](src/main/python/spark/jobs/README.md).
+
+## Spark notebooks and Snowflake compute
+
+The Spark image includes JupyterLab, pandas, PyArrow, Matplotlib, Seaborn, the
+Snowflake Spark connector, and the Snowflake JDBC driver. Notebooks saved under
+`src/main/python/spark/notebooks` are persisted on the host and can import the
+shared connector helper:
+
+```python
+from snowflake_io import create_spark_session, read_snowflake_table
+
+spark = create_spark_session("smart-quality-analysis")
+smart_2018 = read_snowflake_table(
+    spark, "SMART_2018", schema="S_CDATOS_PSET2_SILVER"
+)
+smart_2018.groupBy("model").count().orderBy("count", ascending=False).show()
+```
+
+The connector uses the configured `SNOWFLAKE_WAREHOUSE`, and automatic query
+pushdown is enabled. Compatible filters, projections, and aggregations can run
+inside Snowflake before results cross the network. Spark itself still runs as
+`local[*]` in the container, so Spark-only transformations consume local Docker
+CPU and memory. Keep large work in Snowflake or in pushdown-compatible DataFrame
+operations, and do not call `toPandas()` on an entire SMART table.
 
 ## Snowflake bootstrap and dbt
 
@@ -123,6 +208,38 @@ The stage file format is CSV. Snowflake constructs one source-faithful
 `RAW_RECORD` object from each staged CSV row during the merge. dbt’s project lives at
 `src/main/dbt/ssd_failure_prediction`; its profile reads account-specific
 values with `env_var()`.
+
+## dbt Silver staging models
+
+dbt materializes three incremental tables in `S_CDATOS_PSET2_SILVER`:
+
+- `SMART_2018`
+- `SMART_2019`
+- `SSD_FAILURE_LABELS`
+
+Each SMART model extracts the 105 source fields from `RAW_RECORD`—three
+identity/date fields and 102 normalized/raw SMART measures—and adds ten derived
+key and lineage fields, producing a 115-column baseline relation. The label
+model types the disk identifier and parses `failure_time` into `failure_at` and
+`failure_date`. No source row is filtered at this baseline stage. The complete
+column contracts, structural-null routing, and table materializations are
+documented in the [Silver README](src/main/dbt/ssd_failure_prediction/models/silver/README.md).
+
+Every Silver row retains the Bronze archive, member, row number, source date,
+content hash, ingestion timestamp, and fully qualified source relation.
+`silver_record_id` hashes archive + file + source row and is the stable unique
+key used by dbt incremental merges. `source_file_row_hash_key` hashes file +
+content hash for content/duplicate analysis, but is deliberately not treated as
+unique because two rows in one file may contain identical values.
+
+Run and test this layer with:
+
+```bash
+docker compose --env-file src/res/env/.env run --rm --no-deps \
+  --workdir /workspace/dbt-projects/ssd_failure_prediction dbt-ui-backend \
+  /opt/dbt-ui/backend/.venv/bin/dbt build \
+  --profiles-dir /home/dbtui/.dbt --select tag:silver
+```
 
 ## Stop and reset
 
@@ -171,37 +288,23 @@ columns (`model`, `failure_time`, `disk_id`) for the labels. The helper rejects
 schema drift, malformed row widths, invalid UTF-8, and hidden ZIP metadata such
 as `__MACOSX/._ssd_failure_label.csv`.
 
-### Trigger, errores y backfill
+### Trigger, error handling, and backfill
 
-El flow usa un **trigger manual bajo demanda**. Esta decisión responde a la
-fuente: Alibaba/Tianchi no ofrece para estos archivos un endpoint estable que
-Kestra pueda consultar o descargar periódicamente. La frecuencia operacional es
-por evento: se ejecuta cuando se recibe una nueva versión de uno de los ZIP o
-cuando se solicita un backfill. La adquisición del ZIP es manual, pero la carga
-no lo es: una vez disponible en la zona `raw`, Kestra valida, particiona, sube,
-fusiona y verifica los datos sin ejecutar SQL ni copiar archivos manualmente a
-Snowflake. Un trigger cron no aportaría datos nuevos y solo reprocesaría los ZIP
-locales sin cambios.
+Bronze ingestion is started manually because Alibaba/Tianchi does not provide a
+stable endpoint that Kestra can poll for these archives. After an archive is
+placed in the landing directory, validation, partitioning, upload, merge, and
+reconciliation are automated. Deterministic source errors fail immediately;
+transient Snowflake DDL, `PUT`, and `MERGE` operations use bounded exponential
+retries.
 
-Los errores determinísticos —ZIP ausente, rango inválido, cambio de esquema,
-UTF-8 inválido o fila mal formada— detienen la ejecución inmediatamente. Los
-errores transitorios de Snowflake sí tienen retry exponencial. El DDL y cada
-`PUT` permiten hasta cuatro intentos; el `MERGE`, que puede ser largo, permite
-tres intentos durante un máximo de dos horas. Kestra conserva el estado, intento
-y logs de cada task; la verificación final falla el flow si alguna fila staged
-no aparece en Bronze.
-
-El backfill usa los inputs inclusivos `requested_start_date` y
-`requested_end_date`. Si posteriormente aparece un día que faltaba en 2018, se
-agrega su CSV al ZIP de 2018 y se reejecuta ese día, un rango que lo contenga o
-el año completo. La clave `(SOURCE_ARCHIVE, SOURCE_FILE, SOURCE_ROW)` hace el
-proceso idempotente: una fila idéntica no cambia, una fila nueva se inserta y
-una fila existente cuyo contenido cambió se actualiza únicamente cuando cambia
-`SOURCE_SHA256`. Por tanto, no es necesario convertir el `PUT` en un insert
-condicional; el control de duplicados corresponde al `MERGE` de Bronze. Si una
-versión posterior elimina una fila que antes existía, Bronze no la borra: esa
-reconciliación destructiva debe resolverse explícitamente en Silver, no durante
-la conservación del dato fuente.
+Historical backfills use the inclusive `requested_start_date` and
+`requested_end_date` inputs. Reprocessing is idempotent at
+`(SOURCE_ARCHIVE, SOURCE_FILE, SOURCE_ROW)`: new rows are inserted, unchanged
+rows remain untouched, and changed contents update only when `SOURCE_SHA256`
+differs. Bronze deliberately does not delete a previously preserved row merely
+because a later archive omits it. The complete trigger rationale, retry limits,
+and backfill behavior are documented in the
+[Kestra Bronze ingestion README](src/main/kestra/flows/README.md).
 
 Before running, make sure the existing `S_CDATOS_PSET2` database and
 `S_CDATOS_PSET2_BRONZE` schema are available to the configured role. Add the
