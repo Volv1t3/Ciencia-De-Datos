@@ -1,0 +1,11 @@
+# IDE-managed runtime support is downloaded by PyCharm and is not project code.
+*-pycharm-support-libs/
+
+# Local notebook/runtime caches.
+__pycache__/
+.ipynb_checkpoints/
+
+# Legacy root-level exports. The reproducible null-analysis evidence belongs in
+# ssd_null_analysis_book/exports/; interactive EDA exports belong in exports/.
+/null_column_summary.csv
+/null_pattern_details.csv

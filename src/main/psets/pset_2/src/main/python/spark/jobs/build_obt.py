@@ -12,9 +12,14 @@ def main() -> None:
         print(f"Spark version: {spark.version}")
         print(f"Python version: {platform.python_version()}")
         print(f"Spark master: {spark.sparkContext.master}")
-        print("Snowflake connector class:", end=" ")
-        connector = spark._jvm.net.snowflake.spark.snowflake.DefaultSource
-        print(connector.getClass().getName())
+        connector_class = (
+            spark._jvm.org.apache.spark.sql.execution.datasources.DataSource
+            .lookupDataSource(
+                "net.snowflake.spark.snowflake",
+                spark._jsparkSession.sessionState().conf(),
+            )
+        )
+        print(f"Snowflake connector class: {connector_class.getName()}")
 
         if os.getenv("SNOWFLAKE_ACCOUNT"):
             print("Snowflake credentials are present; no remote query is run by this skeleton.")

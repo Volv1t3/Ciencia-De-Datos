@@ -55,7 +55,7 @@ PostgreSQL port are bound to `127.0.0.1` on the host.
 
 | File | Technical role | Relationships |
 | --- | --- | --- |
-| `docker-compose.yml` | Defines the `kestra-postgres`, `kestra`, `dbt-ui-backend`, `dbt-ui`, and `spark` services; health checks; network; bind mounts; and named volumes. | It is the sole place that connects `src/main` code and `src/res` resources to container paths. It reads values from `src/res/env/.env` and builds Dockerfiles in `src/res/docker/custom-images`. |
+| `docker-compose.yml` | Defines the `kestra-postgres`, `kestra`, `dbt-ui-backend`, `dbt-ui`, `spark`, and `snowpark-connect` services; health checks; network; bind mounts; and named volumes. | It is the sole place that connects `src/main` code and `src/res` resources to container paths. It reads values from `src/res/env/.env` and builds Dockerfiles in `src/res/docker/custom-images`. |
 | `src/res/env/.env.example` | Safe template for ports, local PostgreSQL credentials, Spark resource limits, dbt threads, and Snowflake variables. | Copy to `src/res/env/.env`; Compose interpolates it. The actual `src/res/env/.env` is ignored. Snowflake values are intentionally blank because the project must use an existing account/database selected by the user. |
 | `../../../../.gitignore` | Prevents secrets, local data archives, dbt generated artifacts, bytecode, and private keys from being committed. | Preserves `.gitkeep` so empty required mount directories exist after clone. |
 | `README.md` | Operator-oriented quick start, validation commands, ports, and stop/reset instructions. | Links here for the deeper implementation rationale. |
@@ -134,28 +134,55 @@ authentication and must remain local-only.
 
 ### `spark`
 
-The `spark` service is an idle development container, not a fake distributed
-cluster. Its `while true; sleep 3600` command consumes negligible CPU while
-allowing `docker compose exec spark spark-submit ...`. `spark.master=local[*]`
-causes each submitted job to use the host-visible CPU allocation assigned to the
-container.
+The `spark` service runs JupyterLab as its long-lived process and also supports
+`docker compose exec spark /opt/spark/bin/spark-submit ...`. Jupyter is bound to host port
+`4041` by default, while Spark's application UI is bound to adjacent port
+`4040`. Both bindings are loopback-only. Token authentication is mandatory and
+comes from the private `JUPYTER_TOKEN` environment value. `spark.master=local[*]`
+causes notebook sessions and submitted Spark jobs to use the CPU allocation
+assigned to the container.
 
 It builds from `src/res/docker/custom-images/Dockerfile.pset2.spark`, which uses
 exactly `apache/spark:4.0.4-scala2.13-java21-python3-r-ubuntu`. The tag provides
 Spark 4.0.4, Scala 2.13, Java 21, Python 3, and R. The custom layer adds the
 Scala 2.13 Snowflake connector `3.2.2-spark_4.0` and JDBC driver `4.0.2` to
-`/opt/spark/jars` plus any future requirements listed in the resource file.
+`/opt/spark/jars`. The Python layer adds JupyterLab, ipykernel, pandas, PyArrow,
+Matplotlib, and Seaborn from the pinned requirements manifest.
 
 | Host resource/code | Container path | Technical effect |
 | --- | --- | --- |
 | `src/main/python/spark/jobs` | `/opt/spark/jobs` (read-only) | Versioned PySpark program source. |
+| `src/main/python/spark/lib` | `/opt/spark/lib` (read-only) | Shared Snowflake connector options and DataFrame readers, exposed through `PYTHONPATH`. |
+| `src/main/python/spark/notebooks` | `/opt/spark/notebooks` | Host-persisted notebook source and Jupyter's root directory. |
 | `src/res/config/spark/spark-defaults.conf` | `/opt/spark/conf/spark-defaults.conf` (read-only) | Local master, adaptive SQL, low-noise console settings, and event logging. |
 | `src/res/config/spark/spark-env.sh` | `/opt/spark/conf/spark-env.sh` (read-only) | Converts `src/res/env/.env` memory variables into Spark launcher variables without baking local memory decisions into the image. |
 | `src/res/config/spark/log4j2.properties` | `/opt/spark/conf/log4j2.properties` (read-only) | Reduces Spark/Hadoop logs to warnings while retaining failures. |
 | `src/res/logs/spark` | `/opt/spark/logs` | Receives Spark event-log files declared by `spark.eventLog.dir`. |
 
-The service receives Snowflake values for the eventual OBT job, but the current
-job does not issue a remote query or write any table.
+The shared reader enables Snowflake connector automatic pushdown and selects the
+warehouse named by `SNOWFLAKE_WAREHOUSE`. Operations supported by connector
+pushdown execute in Snowflake; arbitrary PySpark transformations still execute
+in the local container. Secrets are read only from process environment values
+and are neither embedded in notebooks nor printed by the helper.
+
+### `snowpark-connect`
+
+The separate `snowpark-connect` service builds
+`Dockerfile.pset2.snowpark`: Python 3.11, Java 17, Spark/PySpark 3.5.6, and
+Snowpark Connect 1.44.0. It is a headless job runtime and exposes no host port.
+Its default process remains idle so operators can execute versioned programs
+from the read-only `/opt/spark/jobs` mount.
+
+Unlike the `spark` notebook service, this runtime does not use local Spark to
+process the MC1 population. `build_mc1_obt.py` initializes Snowpark Connect and
+Snowflake evaluates its PySpark DataFrame plan using the dedicated warehouse.
+Compose maps `SNOWFLAKE_WAREHOUSE_HIGH_COMPUTE` to the container's standard
+`SNOWFLAKE_WAREHOUSE` variable only for this service. The dbt and notebook
+services continue using the ordinary warehouse setting.
+
+The health check verifies package imports only. It does not prove Snowflake
+authentication, Gold-table access, OBT-schema privileges, or successful remote
+execution.
 
 ## Code under `src/main`
 
@@ -192,10 +219,12 @@ from Bronze; destructive reconciliation belongs in a downstream modeled layer.
 
 | File | What it implements | Integration point |
 | --- | --- | --- |
-| `src/main/dbt/ssd_failure_prediction/dbt_project.yml` | Defines a valid dbt project named `ssd_failure_prediction`, selects its profile, discovers models/macros/tests, and maps future `silver` and `gold` models to the corresponding Snowflake schemas. | dbt-ui discovers this project beneath `/workspace/dbt-projects`; dbt reads the profile from `src/res/config/dbt/profiles`. |
+| `src/main/dbt/ssd_failure_prediction/dbt_project.yml` | Defines the `ssd_failure_prediction` project and materializes Silver models incrementally in the exact `S_CDATOS_PSET2_SILVER` schema. | dbt-ui discovers this project beneath `/workspace/dbt-projects`; dbt reads the profile from `src/res/config/dbt/profiles`. |
 | `packages.yml` | Declares no dbt packages. | Keeps the scaffold minimal and avoids unnecessary third-party code. |
 | `models/sources/sources.yml` | Declares the three raw Bronze tables in the configured Snowflake database and `S_CDATOS_PSET2_BRONZE` schema. | Silver models can refer to the annual SMART and failure-label inputs with `source('bronze', ...)`. |
-| `models/silver/.gitkeep` | Reserves the source-controlled location for future Silver dbt models. | The `+schema: SILVER` project configuration applies here. |
+| `models/silver/smart_2018.sql` and `smart_2019.sql` | Extract and type the 105 SMART fields while retaining Bronze lineage and two complementary row/content keys. | Incremental Snowflake merges use `silver_record_id`, derived from archive/file/source-row coordinates. |
+| `models/silver/ssd_failure_labels.sql` | Types disk, model, failure timestamp, and failure date while retaining Bronze lineage. | Supplies failure events for both SMART years. |
+| `models/silver/schema.yml` and `tests/silver_*.sql` | Document the three Silver relations and test identity, required lineage, typed business fields, year bounds, and source-date consistency. | dbt discovers 37 data tests across the Silver layer. |
 | `models/gold/.gitkeep` | Reserves the source-controlled location for future Gold dbt models. | The `+schema: GOLD` project configuration applies here. |
 | `macros/.gitkeep` | Reserves the project macro directory. | dbt will discover macros added here. |
 | `tests/.gitkeep` | Reserves the project test directory. | dbt will discover singular tests added here. |
@@ -204,8 +233,13 @@ from Bronze; destructive reconciliation belongs in a downstream modeled layer.
 
 | File | What it implements | Integration point |
 | --- | --- | --- |
-| `src/main/python/spark/jobs/build_obt.py` | A safe Spark OBT connectivity skeleton. It creates a `SparkSession`, prints Spark/Python/master information, loads the Snowflake connector class from the JVM classpath, reports whether credentials are present, and stops the session. | Run with `docker compose exec spark spark-submit /opt/spark/jobs/build_obt.py`. It proves local Spark and connector discovery without contacting Snowflake. |
-| `src/main/python/spark/jobs/README.md` | States the future OBT contract: Gold tables → Spark DataFrames → joins/validation → OBT tables. | Documents the explicit boundary between this infrastructure pset and future transformation logic. |
+| `src/main/python/spark/jobs/build_mc1_obt.py` | Canonical Snowpark Connect job for the 847-column RN OBT and its 429-column R/N projections. It validates Gold contracts, applies adjacent calendar windows, constructs 30-day labels, materializes run-scoped stages, validates parity, publishes by zero-copy clone, and records one audit row. | Run as ordinary Python in `snowpark-connect`. A run with no date/SSD bounds is production; bounded runs retain stages and never replace canonical tables. |
+| `src/main/python/spark/jobs/build_obt.py` | A safe Spark OBT connectivity skeleton. It creates a `SparkSession`, prints Spark/Python/master information, loads the Snowflake connector class from the JVM classpath, reports whether credentials are present, and stops the session. | Run with `docker compose exec spark /opt/spark/bin/spark-submit /opt/spark/jobs/build_obt.py`. It proves local Spark and connector discovery without contacting Snowflake. |
+| `src/main/python/spark/jobs/check_snowflake_connection.py` | Executes one metadata query through the connector and reports the active account, role, warehouse, database, and schema. | Run with `docker compose exec spark /opt/spark/bin/spark-submit /opt/spark/jobs/check_snowflake_connection.py` after supplying valid `SNOWFLAKE_*` values. |
+| `src/main/python/spark/lib/snowflake_io.py` | Centralizes environment-derived connector options, enables automatic pushdown, and supplies table/query readers for jobs and notebooks. | Imported through the service's `/opt/spark/lib` `PYTHONPATH`; it never logs credentials. |
+| `src/main/python/spark/notebooks/README.md` | Documents the persistent notebook workspace and safe first-use example. | Served as JupyterLab's root directory on the bind-mounted host path. |
+| `src/main/python/spark/jobs/README.md` | Documents the implemented Gold-to-OBT lineage, production and bounded execution modes, output widths, safeguards, permissions, and run commands. | Operational runbook for the Snowpark Connect job. |
+| `src/test/python/spark/test_build_mc1_obt_contract.py` | Two-row local-Spark contract fixture covering deterministic widths, calendar windows, labels, blocking validations, and R/N parity. | Runs inside the pinned Snowpark image without opening a Snowflake session. |
 
 ## Runtime configuration under `src/res/config`
 
@@ -213,10 +247,10 @@ from Bronze; destructive reconciliation belongs in a downstream modeled layer.
 | --- | --- | --- |
 | `kestra/application.yml` | Selects PostgreSQL for the repository and queue; configures local internal storage at `/app/storage`; maps `${ENV_KESTRA_*}` to the JDBC datasource; disables basic authentication for this local-only stack. | Kestra server. The Compose environment supplies the actual database values. |
 | `dbt/profiles/profiles.yml` | Defines the `ssd_failure_prediction` Snowflake profile. Every account-dependent setting uses dbt `env_var()`, including password and database. | dbt running inside dbt-ui’s backend virtual environment. It must never contain literal credentials. |
-| `spark/spark-defaults.conf` | Sets `local[*]`, adaptive SQL, conservative shuffle partitions, quiet console progress, and Spark event logging to `/opt/spark/logs`. | Spark launcher and submitted Spark jobs. |
+| `spark/spark-defaults.conf` | Sets `local[*]`, port 4040 for the Spark UI, UTC SQL time, adaptive SQL, conservative shuffle partitions, quiet console progress, and Spark event logging to `/opt/spark/logs`. | Spark launcher, submitted jobs, and notebook sessions. |
 | `spark/spark-env.sh` | Exports `SPARK_DRIVER_MEMORY` and `SPARK_EXECUTOR_MEMORY`, using `src/res/env/.env` values or `2g` local fallbacks. | Sourced by Spark launch scripts; it makes memory adjustable without changing source or rebuilding an image. |
 | `spark/log4j2.properties` | Configures Spark/Hadoop loggers to WARN and defines a console appender. | Spark’s Log4j2 runtime. |
-| `spark/requirements.txt` | Reserved resource manifest for Python libraries required by future Spark jobs. | Copied by the Spark Dockerfile and installed during image build. It is currently intentionally empty except comments. |
+| `spark/requirements.txt` | Pins the Jupyter kernel, dataframe/Arrow bridge, and plotting libraries compatible with the image's Python 3.10 runtime. | Copied by the Spark Dockerfile and installed during image build. |
 
 ## Snowflake bootstrap resources
 
@@ -269,6 +303,10 @@ because Git otherwise omits empty directories that Docker must mount.
 
 ## Image resources
 
+See `src/res/docker/custom-images/README.md` for the complete image inventory,
+the Jupyter/PySpark kernel contract, validation commands, and an explanation of
+the expected Snowflake cloud-metadata and wide-plan log messages.
+
 | File | Technical purpose |
 | --- | --- |
 | `src/res/docker/custom-images/Dockerfile.semana05.backend` | Supplied dbt-ui backend build recipe: pins upstream dbt-ui, creates its virtual environment, and installs dbt plus adapters. Compose builds it as `pset2-dbt-ui-backend:1fe89c5`. |
@@ -296,12 +334,13 @@ manually acquired input data and must be backed up independently.
 | --- | --- | --- |
 | Render configuration | `docker compose --env-file .env.example config` | YAML, interpolation, mounts, and required variables are coherent. |
 | Build images | `docker compose build` | The supplied dbt-ui recipes and custom Spark recipe can retrieve and assemble their pinned dependencies. |
-| Service health | `docker compose up -d && docker compose ps` | PostgreSQL gates Kestra; dbt frontend gates on backend health; Spark stays ready for `exec`. |
+| Service health | `docker compose up -d && docker compose ps` | PostgreSQL gates Kestra; dbt frontend gates on backend health; Jupyter is healthy before Spark is reported ready. |
 | Landing visibility | `docker compose exec kestra ls -l /usr/data/landing` | The resource landing directory is visible at the flow contract path. |
 | dbt integration | `docker compose exec dbt-ui-backend /opt/dbt-ui/backend/.venv/bin/dbt --version` | dbt-ui’s own subprocess virtual environment contains dbt and adapters. |
-| Spark integration | `docker compose exec spark spark-submit /opt/spark/jobs/build_obt.py` | Spark starts local mode and discovers the installed Snowflake connector. |
+| Spark integration | `docker compose exec spark /opt/spark/bin/spark-submit /opt/spark/jobs/build_obt.py` | Spark starts local mode and discovers the installed Snowflake connector. |
+| Snowflake connector | `docker compose exec spark /opt/spark/bin/spark-submit /opt/spark/jobs/check_snowflake_connection.py` | The connector authenticates and a query executes in the configured Snowflake warehouse. |
 
-Do not treat successful container startup as a Snowflake connectivity test. That
-test is intentionally opt-in and occurs only when valid user-provided
-`SNOWFLAKE_*` values are present and `dbt debug` (or a future controlled job) is
-run.
+Do not treat successful container startup as a Snowflake connectivity test.
+That test is intentionally opt-in and occurs only when valid user-provided
+`SNOWFLAKE_*` values are present and `dbt debug` or the controlled Spark smoke
+test is run.

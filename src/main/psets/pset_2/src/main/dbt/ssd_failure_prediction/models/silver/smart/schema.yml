@@ -1,0 +1,170 @@
+version: 2
+
+models:
+  - name: int_smart_2018_null_processed
+    description: >-
+      2018 SMART telemetry after removing globally unavailable SMART columns and
+      routing records with no retained SMART measurements to the audit relation.
+      Partial null values are preserved without imputation.
+    data_tests:
+      - at_least_one_retained_smart_attribute_is_present
+      - smart_columns_absent:
+          arguments:
+            column_scope: global
+      - smart_source_partition_reconciles:
+          arguments:
+            source_model: "{{ ref('smart_2018') }}"
+            audit_model: "{{ ref('int_audit_smart_2018_no_attributes') }}"
+    columns:
+      - name: silver_record_id
+        data_tests: [not_null, unique]
+      - name: model_code
+        data_tests: [not_null]
+
+  - name: int_smart_2019_null_processed
+    description: >-
+      2019 SMART telemetry after removing globally unavailable SMART columns and
+      routing records with no retained SMART measurements to the audit relation.
+      Partial null values are preserved without imputation.
+    data_tests:
+      - at_least_one_retained_smart_attribute_is_present
+      - smart_columns_absent:
+          arguments:
+            column_scope: global
+      - smart_source_partition_reconciles:
+          arguments:
+            source_model: "{{ ref('smart_2019') }}"
+            audit_model: "{{ ref('int_audit_smart_2019_no_attributes') }}"
+    columns:
+      - name: silver_record_id
+        data_tests: [not_null, unique]
+      - name: model_code
+        data_tests: [not_null]
+
+  - name: int_audit_smart_2018_no_attributes
+    description: >-
+      2018 records containing metadata but no retained SMART values. Rows remain
+      available for lineage and investigation outside the modeling lineage.
+    data_tests:
+      - all_retained_smart_attributes_are_null
+      - smart_columns_absent:
+          arguments:
+            column_scope: global
+    columns:
+      - name: silver_record_id
+        data_tests: [not_null, unique]
+      - name: source_year
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: [2018]
+                quote: false
+      - name: audit_reason
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: [ALL_SMART_ATTRIBUTES_NULL]
+
+  - name: int_audit_smart_2019_no_attributes
+    description: >-
+      2019 records containing metadata but no retained SMART values. Rows remain
+      available for lineage and investigation outside the modeling lineage.
+    data_tests:
+      - all_retained_smart_attributes_are_null
+      - smart_columns_absent:
+          arguments:
+            column_scope: global
+    columns:
+      - name: silver_record_id
+        data_tests: [not_null, unique]
+      - name: source_year
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: [2019]
+                quote: false
+      - name: audit_reason
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: [ALL_SMART_ATTRIBUTES_NULL]
+
+  - name: int_smart_2018_mc1
+    description: >-
+      Clean 2018 MC1 telemetry with globally unavailable and MC1-specific
+      structurally unavailable SMART columns removed.
+    data_tests:
+      - smart_columns_absent:
+          arguments:
+            column_scope: mc1
+    columns:
+      - name: silver_record_id
+        data_tests: [not_null, unique]
+      - name: model_code
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [MC1]
+
+  - name: int_smart_2019_mc1
+    description: >-
+      Clean 2019 MC1 telemetry with globally unavailable and MC1-specific
+      structurally unavailable SMART columns removed.
+    data_tests:
+      - smart_columns_absent:
+          arguments:
+            column_scope: mc1
+    columns:
+      - name: silver_record_id
+        data_tests: [not_null, unique]
+      - name: model_code
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [MC1]
+
+  - name: smart_null_processed_all_years
+    description: >-
+      Final Silver relation containing all cleaned 2018 and 2019 SMART
+      observations. The source period remains available through OBSERVATION_DATE;
+      partial null values are preserved without imputation.
+    data_tests:
+      - at_least_one_retained_smart_attribute_is_present
+      - smart_columns_absent:
+          arguments:
+            column_scope: global
+      - smart_year_union_reconciles:
+          arguments:
+            model_2018: "{{ ref('int_smart_2018_null_processed') }}"
+            model_2019: "{{ ref('int_smart_2019_null_processed') }}"
+            feature_scope: global
+    columns:
+      - name: silver_record_id
+        data_tests: [not_null, unique]
+      - name: model_code
+        data_tests: [not_null]
+
+  - name: smart_mc1_all_years
+    description: >-
+      Final Silver MC1 relation merging the schema-compatible 2018 and 2019
+      MC1 intermediates while retaining OBSERVATION_DATE and complete lineage.
+    data_tests:
+      - smart_columns_absent:
+          arguments:
+            column_scope: mc1
+      - smart_year_union_reconciles:
+          arguments:
+            model_2018: "{{ ref('int_smart_2018_mc1') }}"
+            model_2019: "{{ ref('int_smart_2019_mc1') }}"
+            feature_scope: mc1
+    columns:
+      - name: silver_record_id
+        data_tests: [not_null, unique]
+      - name: model_code
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [MC1]

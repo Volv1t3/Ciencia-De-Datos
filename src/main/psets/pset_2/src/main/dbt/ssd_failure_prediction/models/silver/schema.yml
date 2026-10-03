@@ -1,0 +1,85 @@
+version: 2
+
+models:
+  - name: smart_2018
+    description: Typed, row-grain 2018 SMART telemetry with Bronze lineage preserved.
+    columns:
+      - name: silver_record_id
+        description: Stable row key derived from source archive, member file, and source row number.
+        data_tests: [not_null, unique]
+      - name: source_file_row_hash_key
+        description: Content-oriented key derived from source file and Bronze row hash; retained for duplicate analysis, not assumed unique.
+        data_tests: [not_null]
+      - name: disk_id
+        data_tests: [not_null]
+      - name: observation_date
+        data_tests: [not_null]
+      - name: model_code
+        data_tests: [not_null]
+      - name: source_archive
+        data_tests: [not_null]
+      - name: source_file
+        data_tests: [not_null]
+      - name: source_row
+        data_tests: [not_null]
+      - name: bronze_source_relation
+        description: Fully qualified Bronze relation from which this Silver row was derived.
+        data_tests: [not_null]
+      - name: source_sha256
+        data_tests: [not_null]
+
+  - name: smart_2019
+    description: Typed, row-grain 2019 SMART telemetry with Bronze lineage preserved.
+    columns:
+      - name: silver_record_id
+        description: Stable row key derived from source archive, member file, and source row number.
+        data_tests: [not_null, unique]
+      - name: source_file_row_hash_key
+        description: Content-oriented key derived from source file and Bronze row hash; retained for duplicate analysis, not assumed unique.
+        data_tests: [not_null]
+      - name: disk_id
+        data_tests: [not_null]
+      - name: observation_date
+        data_tests: [not_null]
+      - name: model_code
+        data_tests: [not_null]
+      - name: source_archive
+        data_tests: [not_null]
+      - name: source_file
+        data_tests: [not_null]
+      - name: source_row
+        data_tests: [not_null]
+      - name: bronze_source_relation
+        description: Fully qualified Bronze relation from which this Silver row was derived.
+        data_tests: [not_null]
+      - name: source_sha256
+        data_tests: [not_null]
+
+  - name: ssd_failure_labels
+    description: Typed SSD failure events for 2018 and 2019 with Bronze lineage preserved.
+    columns:
+      - name: silver_record_id
+        description: Stable row key derived from source archive, member file, and source row number.
+        data_tests: [not_null, unique]
+      - name: source_file_row_hash_key
+        description: Content-oriented key derived from source file and Bronze row hash; retained for duplicate analysis, not assumed unique.
+        data_tests: [not_null]
+      - name: disk_id
+        data_tests: [not_null]
+      - name: model_code
+        data_tests: [not_null]
+      - name: failure_at
+        data_tests: [not_null]
+      - name: failure_date
+        data_tests: [not_null]
+      - name: source_archive
+        data_tests: [not_null]
+      - name: source_file
+        data_tests: [not_null]
+      - name: source_row
+        data_tests: [not_null]
+      - name: bronze_source_relation
+        description: Fully qualified Bronze relation from which this Silver row was derived.
+        data_tests: [not_null]
+      - name: source_sha256
+        data_tests: [not_null]

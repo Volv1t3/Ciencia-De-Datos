@@ -1,0 +1,201 @@
+version: 2
+
+models:
+  - name: dim_date
+    description: Continuous conformed calendar covering all SMART observations and failure events.
+    data_tests:
+      - continuous_date_spine
+    columns:
+      - name: date_key
+        data_tests: [not_null, unique]
+      - name: full_date
+        data_tests: [not_null, unique]
+
+  - name: dim_ssd
+    description: >-
+      Conformed physical-SSD dimension populated from every SMART observation
+      and failure label. DISK_ID and MODEL_CODE form the natural business key.
+    data_tests:
+      - unique_column_combination:
+          arguments:
+            columns: [disk_id, model_code]
+      - ssd_dimension_covers_source:
+          arguments:
+            source_model: "{{ ref('smart_null_processed_all_years') }}"
+      - ssd_dimension_covers_source:
+          arguments:
+            source_model: "{{ ref('ssd_failure_labels') }}"
+    columns:
+      - name: ssd_key
+        data_tests: [not_null, unique]
+      - name: disk_id
+        data_tests: [not_null]
+      - name: model_code
+        data_tests: [not_null]
+
+  - name: fct_smart_daily_all
+    description: >-
+      One cleaned SMART observation per SSD business key and date across all
+      models. All 68 retained SMART measures pass through unchanged. DISK_ID and
+      MODEL_CODE resolve to DIM_SSD; ingestion-lineage metadata remains in Silver.
+    data_tests:
+      - unique_column_combination:
+          arguments:
+            columns: [ssd_key, observation_date]
+      - smart_fact_has_measurement:
+          arguments:
+            feature_scope: global
+      - smart_pair_missingness_matches:
+          arguments:
+            feature_scope: global
+      - gold_row_count_matches_source:
+          arguments:
+            source_model: "{{ ref('smart_null_processed_all_years') }}"
+    columns:
+      - name: smart_daily_key
+        description: Deterministic Gold fact key derived from SSD_KEY and OBSERVATION_DATE.
+        data_tests: [not_null, unique]
+      - name: ssd_key
+        description: Foreign key replacing the Silver DISK_ID and MODEL_CODE columns in the fact.
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: "{{ ref('dim_ssd') }}"
+                field: ssd_key
+      - name: observation_date_key
+        description: Foreign key resolving OBSERVATION_DATE to the conformed calendar dimension.
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: "{{ ref('dim_date') }}"
+                field: date_key
+      - name: observation_date
+        description: Original Silver observation date retained without transformation.
+        data_tests: [not_null]
+
+  - name: fct_smart_daily_mc1
+    description: >-
+      One cleaned MC1 SMART observation per SSD business key and date. All 44
+      MC1 SMART measures pass through unchanged. DISK_ID and MODEL_CODE resolve
+      to DIM_SSD; ingestion-lineage metadata remains in Silver.
+    data_tests:
+      - unique_column_combination:
+          arguments:
+            columns: [ssd_key, observation_date]
+      - smart_fact_has_measurement:
+          arguments:
+            feature_scope: mc1
+      - smart_pair_missingness_matches:
+          arguments:
+            feature_scope: mc1
+      - fact_ssd_model_is:
+          arguments:
+            dimension_model: "{{ ref('dim_ssd') }}"
+            expected_model_code: MC1
+      - gold_row_count_matches_source:
+          arguments:
+            source_model: "{{ ref('smart_mc1_all_years') }}"
+    columns:
+      - name: smart_daily_key
+        description: Deterministic Gold fact key derived from SSD_KEY and OBSERVATION_DATE.
+        data_tests: [not_null, unique]
+      - name: ssd_key
+        description: Foreign key replacing the Silver DISK_ID and MODEL_CODE columns in the fact.
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: "{{ ref('dim_ssd') }}"
+                field: ssd_key
+      - name: observation_date_key
+        description: Foreign key resolving OBSERVATION_DATE to the conformed calendar dimension.
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: "{{ ref('dim_date') }}"
+                field: date_key
+      - name: observation_date
+        description: Original Silver observation date retained without transformation.
+        data_tests: [not_null]
+
+  - name: fct_failure_event_all
+    description: Confirmed SSD failure events across every available model.
+    data_tests:
+      - unique_column_combination:
+          arguments:
+            columns: [ssd_key, failure_date]
+          config:
+            severity: warn
+      - gold_row_count_matches_source:
+          arguments:
+            source_model: "{{ ref('ssd_failure_labels') }}"
+    columns:
+      - name: failure_event_key
+        data_tests: [not_null, unique]
+      - name: ssd_key
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: "{{ ref('dim_ssd') }}"
+                field: ssd_key
+      - name: failure_date_key
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: "{{ ref('dim_date') }}"
+                field: date_key
+      - name: failure_date
+        data_tests: [not_null]
+      - name: failure_count
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: [1]
+                quote: false
+
+  - name: fct_failure_event_mc1
+    description: Confirmed failure events restricted to the MC1 SSD population.
+    data_tests:
+      - unique_column_combination:
+          arguments:
+            columns: [ssd_key, failure_date]
+          config:
+            severity: warn
+      - fact_ssd_model_is:
+          arguments:
+            dimension_model: "{{ ref('dim_ssd') }}"
+            expected_model_code: MC1
+      - gold_row_count_matches_source:
+          arguments:
+            source_model: "{{ ref('ssd_failure_labels') }}"
+            source_scope: mc1
+    columns:
+      - name: failure_event_key
+        data_tests: [not_null, unique]
+      - name: ssd_key
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: "{{ ref('dim_ssd') }}"
+                field: ssd_key
+      - name: failure_date_key
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: "{{ ref('dim_date') }}"
+                field: date_key
+      - name: failure_date
+        data_tests: [not_null]
+      - name: failure_count
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: [1]
+                quote: false
