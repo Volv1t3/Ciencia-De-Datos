@@ -11,7 +11,7 @@ services:
       POSTGRES_USER: ${KESTRA_POSTGRES_USER:?set KESTRA_POSTGRES_USER in .env}
       POSTGRES_PASSWORD: ${KESTRA_POSTGRES_PASSWORD:?set KESTRA_POSTGRES_PASSWORD in .env}
     ports:
-      - "${KESTRA_POSTGRES_HOST_PORT}:5432"
+      - "127.0.0.1:${KESTRA_POSTGRES_HOST_PORT}:5432"
     volumes:
       - kestra_postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -44,8 +44,8 @@ services:
       SECRET_SNOWFLAKE_ROLE: ${SECRET_SNOWFLAKE_ROLE:?set base64-encoded SECRET_SNOWFLAKE_ROLE in .env}
       SECRET_SNOWFLAKE_WAREHOUSE: ${SECRET_SNOWFLAKE_WAREHOUSE:?set base64-encoded SECRET_SNOWFLAKE_WAREHOUSE in .env}
     ports:
-      - "${KESTRA_PORT}:8080"
-      - "${KESTRA_MANAGEMENT_PORT}:8081"
+      - "127.0.0.1:${KESTRA_PORT}:8080"
+      - "127.0.0.1:${KESTRA_MANAGEMENT_PORT}:8081"
     volumes:
       - ./src/res/config/kestra/application.yml:/etc/kestra/application.yml:ro
       - ./src/main/kestra/flows:/workspace/kestra/flows
@@ -113,7 +113,7 @@ services:
       args:
         DBT_UI_COMMIT: ${DBT_UI_COMMIT:-1fe89c5d023cd4d7a88642091c303a75839534f9}
     ports:
-      - "${DBT_UI_PORT}:8080"
+      - "127.0.0.1:${DBT_UI_PORT}:8080"
     depends_on:
       dbt-ui-backend:
         condition: service_healthy
