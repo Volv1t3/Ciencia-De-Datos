@@ -26,30 +26,30 @@ whereas `src/res/config/kestra/application.yml` configures Kestra itself.
 ## System topology
 
 ```text
-Host files                                      Docker network
-──────────                                      ──────────────
+Host files                                      Docker network / external services
+──────────                                      ───────────────────────────────────
 src/res/data/raw ──read-only──► Kestra ──JDBC──► kestra-postgres
-       │                             │                 │
-       │                             ├── imports flow   └── named metadata volume
-       │                             │    source from src/main/kestra/flows
-       │                             └── future Snowflake ingestion
-       │
-src/main/dbt ──bind mount──► dbt-ui backend ◄── Nginx dbt-ui browser service
-                                    │
-                       dbt profile from src/res/config/dbt
-                                    │
-                               Snowflake (external)
-                                    │
-src/main/python/spark/jobs ─► Spark local[*] ─┘
-        │                         │
-src/res/config/spark ─────────────┘
+                                      │                 └── named metadata volume
+src/main/kestra/flows ──import────┘
+                                      │ PUT/MERGE
+                                      ▼
+                              Snowflake (external)
+                              Bronze → Silver → Gold → OBT
+                                      ▲          ▲
+src/main/dbt ──bind mount──► dbt-ui backend    │
+                                      │ dbt      │ Snowpark Connect
+Nginx dbt-ui browser service ───────┘          │
+src/main/python/spark/jobs ──bind mount──────────┘
+          │
+          └──► Spark local[*] for notebooks, EDA, and connector smoke tests
 ```
 
 All Compose services use the private bridge network
 `ciencia-de-datos-data-platform-pset-2`. Services resolve each other through
 their service names; no container-to-container IP address is hard-coded.
-Only the Kestra UI/management interface, dbt-ui browser interface, and optional
-PostgreSQL port are bound to `127.0.0.1` on the host.
+Spark UI and Jupyter are explicitly bound to `127.0.0.1`. The current Compose
+port mappings for Kestra, dbt-ui, and the optional PostgreSQL host port do not
+specify a host address and therefore publish on Docker's default host interfaces.
 
 ## Root deployment files
 
@@ -71,13 +71,13 @@ PostgreSQL port are bound to `127.0.0.1` on the host.
 named `kestra_postgres_data` volume, and is checked with `pg_isready`.
 
 It exists only for Kestra: no dbt model, Spark job, or warehouse table is hosted
-there. The host mapping defaults to `127.0.0.1:5433` to avoid conflicting with a
+there. The example host port defaults to `5433` to avoid conflicting with a
 developer’s PostgreSQL on port 5432; containers always use
 `kestra-postgres:5432` internally.
 
 ### `kestra`
 
-`kestra` runs the pinned `kestra/kestra:v1.3.38` image in standalone server
+`kestra` runs the pinned `kestra/kestra:v1.3.40` image in standalone server
 mode. Its dependency condition prevents it from starting until
 `kestra-postgres` passes the health check. It gets its JDBC hostname and
 credentials through `ENV_KESTRA_*`, never from the checked-in YAML.
@@ -225,9 +225,11 @@ from Bronze; destructive reconciliation belongs in a downstream modeled layer.
 | `models/silver/smart_2018.sql` and `smart_2019.sql` | Extract and type the 105 SMART fields while retaining Bronze lineage and two complementary row/content keys. | Incremental Snowflake merges use `silver_record_id`, derived from archive/file/source-row coordinates. |
 | `models/silver/ssd_failure_labels.sql` | Types disk, model, failure timestamp, and failure date while retaining Bronze lineage. | Supplies failure events for both SMART years. |
 | `models/silver/schema.yml` and `tests/silver_*.sql` | Document the three Silver relations and test identity, required lineage, typed business fields, year bounds, and source-date consistency. | dbt discovers 37 data tests across the Silver layer. |
-| `models/gold/.gitkeep` | Reserves the source-controlled location for future Gold dbt models. | The `+schema: GOLD` project configuration applies here. |
-| `macros/.gitkeep` | Reserves the project macro directory. | dbt will discover macros added here. |
-| `tests/.gitkeep` | Reserves the project test directory. | dbt will discover singular tests added here. |
+| `models/silver/smart/**` | Implements all-model null processing, MC1 specialization, year unions, and audit quarantine relations. | Final Silver tables feed the Gold dimensions and facts. |
+| `models/gold/dimensions/*.sql` | Builds the conformed SSD and continuous date dimensions. | Both all-model and MC1 facts resolve their foreign keys through these dimensions. |
+| `models/gold/facts/*.sql` | Builds daily SMART and failure-event facts for the all-model and MC1 populations. | These table models form the documented star schemas; the MC1 facts feed the OBT job. |
+| `models/gold/schema.yml` | Documents and tests Gold keys, grains, dimension relationships, model scope, measure presence, and source/fact row-count parity. | Custom generic tests are implemented by the SQL macros under `macros/`. |
+| `models/gold/README.md` | Defines the dimensional model, relation grains, column reconciliation, tests, and Mermaid ER diagram. | Serves as the Gold contract for analysts and the downstream OBT builder. |
 
 ### Spark job source
 
@@ -262,7 +264,8 @@ formats, and stages.
 
 They do not create a database because account/database ownership and naming are
 external infrastructure decisions. The user chooses an existing database, which
-must also be the value of `SNOWFLAKE_DATABASE` in `src/res/env/.env` for dbt and future jobs.
+must also be the value of `SNOWFLAKE_DATABASE` in `src/res/env/.env` for dbt,
+Spark connector checks, and Snowpark Connect OBT jobs.
 
 ### Correct execution procedure
 
@@ -332,13 +335,16 @@ manually acquired input data and must be backed up independently.
 
 | Goal | Command | What success proves |
 | --- | --- | --- |
-| Render configuration | `docker compose --env-file .env.example config` | YAML, interpolation, mounts, and required variables are coherent. |
+| Render configuration | `docker compose --env-file src/res/env/.env.example config` | YAML, interpolation, mounts, and required variables are coherent. |
 | Build images | `docker compose build` | The supplied dbt-ui recipes and custom Spark recipe can retrieve and assemble their pinned dependencies. |
 | Service health | `docker compose up -d && docker compose ps` | PostgreSQL gates Kestra; dbt frontend gates on backend health; Jupyter is healthy before Spark is reported ready. |
 | Landing visibility | `docker compose exec kestra ls -l /usr/data/landing` | The resource landing directory is visible at the flow contract path. |
 | dbt integration | `docker compose exec dbt-ui-backend /opt/dbt-ui/backend/.venv/bin/dbt --version` | dbt-ui’s own subprocess virtual environment contains dbt and adapters. |
+| dbt Silver and Gold | `docker compose --env-file src/res/env/.env run --rm --no-deps --workdir /workspace/dbt-projects/ssd_failure_prediction dbt-ui-backend /opt/dbt-ui/backend/.venv/bin/dbt build --profiles-dir /home/dbtui/.dbt` | With valid Snowflake credentials and populated Bronze tables, dbt materializes and tests the complete Silver/Gold lineage. |
 | Spark integration | `docker compose exec spark /opt/spark/bin/spark-submit /opt/spark/jobs/build_obt.py` | Spark starts local mode and discovers the installed Snowflake connector. |
 | Snowflake connector | `docker compose exec spark /opt/spark/bin/spark-submit /opt/spark/jobs/check_snowflake_connection.py` | The connector authenticates and a query executes in the configured Snowflake warehouse. |
+| OBT contract | `docker compose --env-file src/res/env/.env run --rm --no-deps -v .:/workspace:ro snowpark-connect python /workspace/src/test/python/spark/test_build_mc1_obt_contract.py` | The local fixture validates OBT schemas, window and label semantics, blocking predicates, and R/N projection parity without connecting to Snowflake. |
+| OBT bounded run | `docker compose --env-file src/res/env/.env run --rm --no-deps snowpark-connect python /opt/spark/jobs/build_mc1_obt.py --start-date 2018-01-01 --end-date 2018-01-31 --ssd-limit 100 --validate-only` | With valid Snowflake access and populated Gold tables, Snowpark Connect builds and validates a bounded MC1 OBT plan without publishing canonical tables. |
 
 Do not treat successful container startup as a Snowflake connectivity test.
 That test is intentionally opt-in and occurs only when valid user-provided
