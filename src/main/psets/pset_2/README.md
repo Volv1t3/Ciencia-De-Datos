@@ -83,8 +83,8 @@ storage intentionally remain Docker-managed persistent state.
 - Docker Desktop with Compose v2 (Apple Silicon is supported by the selected
   multi-platform PostgreSQL and Spark 4.0.4 / Scala 2.13 / Java 21 image).
 - At least 4 GB of Docker memory available for Kestra plus local Spark.
-- A Snowflake account only when running dbt connectivity checks or future
-  warehouse work.
+- A Snowflake account for Bronze ingestion, dbt Silver/Gold builds, warehouse
+  EDA, connector checks, and production Snowpark Connect OBT builds.
 - The three archives downloaded manually from Tianchi: `smartlog2018ssd.zip`,
   `smartlog2019ssd.zip`, and `ssd_failure_label.csv.zip`.
 
@@ -254,8 +254,8 @@ host files and are not put in a Docker volume.
 
 ## Troubleshooting
 
-- A missing archive makes the skeleton flow fail by design. Verify the exact
-  filename and that the file is readable under `src/res/data/raw`.
+- A missing archive makes the Bronze ingestion flow fail by design. Verify the
+  exact filename and that the file is readable under `src/res/data/raw`.
 - On Apple Silicon, ensure Docker Desktop is current and has enough memory;
   the selected Spark 4.0.4 tag publishes an ARM64 variant. If a custom dependency
   later proves AMD64-only, diagnose it explicitly rather than silently forcing
