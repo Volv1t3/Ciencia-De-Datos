@@ -17,9 +17,9 @@ Proyecto dbt: [`src/main/dbt/ssd_failure_prediction`](../src/main/dbt/ssd_failur
 
 ```mermaid
 flowchart LR
-    S18[(SMART_2018)] -->|">=1 medición"| N18[(INT_SMART_2018_NULL_PROCESSED)]
+    S18[(SMART_2018)] -->|"al menos 1 medición"| N18[(INT_SMART_2018_NULL_PROCESSED)]
     S18 -->|"todas nulas"| A18[(INT_AUDIT_SMART_2018_NO_ATTRIBUTES)]
-    S19[(SMART_2019)] -->|">=1 medición"| N19[(INT_SMART_2019_NULL_PROCESSED)]
+    S19[(SMART_2019)] -->|"al menos 1 medición"| N19[(INT_SMART_2019_NULL_PROCESSED)]
     S19 -->|"todas nulas"| A19[(INT_AUDIT_SMART_2019_NO_ATTRIBUTES)]
     N18 --> ALL[(SMART_NULL_PROCESSED_ALL_YEARS<br/>68 medidas)]
     N19 --> ALL
