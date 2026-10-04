@@ -10,7 +10,6 @@
 | La relación numérica entre `r_X` y `n_X` no se puede reconstruir con los exportes agregados | No se sabe si conviene usar R, N o ambas; por eso se publican las 3 variantes de la OBT | Analizar la relación con datos fila a fila en la etapa de modelado |
 | SMART 211 es casi totalmente nulo en MC1 (99,995547 %) | Probablemente no aporta al modelo | Decidir en la selección de variables, no en la limpieza |
 | La prevalencia de fallas cambia entre años (0,105 % → 0,404 %) | Un split aleatorio sobreestimaría el desempeño | Validación temporal por meses |
-| Etiquetas: 16.305 filas en la tabla frente a 10.510 eventos (1.964 + 8.546) en el exporte de cobertura | La diferencia no está explicada en los exportes y podría venir del alcance del exporte | Contar en Snowflake las etiquetas por año y por modelo, y conciliar |
 | `DAYS_TO_FAILURE` usa la **primera** falla del SSD | Las fallas posteriores del mismo disco no generan etiquetas propias | Aceptable para "¿cuándo falla por primera vez?"; documentado en la auditoría |
 | Los datos son observacionales | No se puede afirmar causalidad (firmware, carga de trabajo y edad son confusores) | Fuera del alcance del pipeline |
 

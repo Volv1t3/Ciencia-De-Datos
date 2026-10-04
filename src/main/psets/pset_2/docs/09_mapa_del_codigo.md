@@ -1,6 +1,6 @@
 # 9. Mapa del código
 
-[← Ejecución](08_ejecucion.md) · [Índice](README.md) · **Mapa del código**
+[← Ejecución](08_ejecucion.md) · [Índice](README.md) · **Mapa del código** · [Siguiente: Notebooks →](10_notebooks.md)
 
 Todos los archivos de código tienen comentarios en español con el prefijo `#?`, `--?` o `{#? #}`
 (estilo *Better Comments*), que explican qué hace cada bloque y por qué.

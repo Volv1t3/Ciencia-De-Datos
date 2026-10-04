@@ -13,7 +13,7 @@ y en `spark/notebooks/exports`. Todas las cifras de este documento salen de esos
 | --- | ---: | --- |
 | SMART 2018 | 135.843.663 | Nulos muy estructurados: dependen del modelo de SSD |
 | SMART 2019 | 137.268.621 | Misma estructura; un atributo (211) aparece recién en 2019 |
-| Etiquetas de falla | 16.305 | 0 nulos en todas las columnas |
+| Etiquetas de falla | 16.305 (todos los modelos; 1.964 en 2018 y 8.546 en 2019 son de MC1) | 0 nulos en todas las columnas |
 | MC1 2018 / 2019 | 53.789.530 / 61.484.596 | Población objetivo del modelo predictivo |
 
 ## Problemas, evidencia, acción y justificación
