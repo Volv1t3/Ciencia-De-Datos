@@ -1,5 +1,11 @@
 """Generate the menu-driven SSD failure-label EDA notebook."""
 
+#? Generador de notebook de EDA (Analisis Exploratorio). Este script NO analiza datos: escribe un
+#? archivo .ipynb en notebooks/datagrip/ con celdas de markdown y codigo. El notebook generado se
+#? abre en JupyterLab (contenedor spark) y consulta Silver en Snowflake para medir completitud
+#? (nulos por columna y patrones de nulos), validez (rangos, distribuciones), duplicados y riesgo
+#? de falla. Sus resultados (CSV en exports/) son la evidencia de la politica de limpieza de dbt.
+#? Ojo: el contenido de las celdas esta dentro de cadenas de texto; cambiarlo cambia el notebook.
 from __future__ import annotations
 
 import json
@@ -13,10 +19,12 @@ TARGET = (
 )
 
 
+#? Crea una celda markdown en formato nbformat.
 def markdown(source: str) -> dict:
     return {"cell_type": "markdown", "metadata": {}, "source": source}
 
 
+#? Crea una celda de codigo vacia de resultados (outputs = []).
 def code(source: str) -> dict:
     return {
         "cell_type": "code",
@@ -27,6 +35,7 @@ def code(source: str) -> dict:
     }
 
 
+#? Lista de celdas del notebook, en orden. Todo lo que sigue entre comillas es contenido de celdas.
 cells = [
     markdown(
         """# SSD failure-label exploratory data analysis
@@ -418,6 +427,7 @@ plt.show()
     code("spark.stop()"),
 ]
 
+#? Estructura final del .ipynb: celdas + kernel "pyspark-snowflake" (ver src/res/config/spark/kernels).
 notebook = {
     "cells": cells,
     "metadata": {
@@ -432,6 +442,7 @@ notebook = {
     "nbformat_minor": 5,
 }
 
+#? Escribe el notebook en disco (se sobreescribe en cada ejecucion del generador).
 TARGET.parent.mkdir(parents=True, exist_ok=True)
 TARGET.write_text(json.dumps(notebook, indent=1) + "\n", encoding="utf-8")
 print(f"Wrote {TARGET} with {len(cells)} cells")
