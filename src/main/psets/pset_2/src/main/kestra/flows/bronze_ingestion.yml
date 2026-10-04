@@ -465,3 +465,43 @@ tasks:
     type: io.kestra.plugin.core.execution.Fail
     condition: "{{ outputs.verify_load.row.MISSING_ROWS > 0 }}"
     errorMessage: Snowflake BRONZE is missing rows from this execution.
+
+  #? ========================================================================================
+  #? BLOQUE 6: LIMPIEZA DEL STAGE (solo si todo salio bien).
+  #? ----------------------------------------------------------------------------------------
+  #? Los .csv.gz de esta ejecucion ya estan en Bronze y reconciliados -> se borran del stage para
+  #? que no se acumulen (costo de almacenamiento). Si la ejecucion fallo antes, esta tarea no
+  #? corre y los archivos quedan en el stage para poder investigar.
+  #? ========================================================================================
+  - id: remove_execution_stage_files
+    type: io.kestra.plugin.jdbc.snowflake.Query
+    retry:
+      type: exponential
+      interval: PT10S
+      maxInterval: PT1M
+      maxAttempts: 4
+      maxDuration: PT10M
+      warningOnRetry: true
+    url: "jdbc:snowflake://{{ secret('SNOWFLAKE_ACCOUNT') }}.snowflakecomputing.com"
+    username: "{{ secret('SNOWFLAKE_USER') }}"
+    password: "{{ secret('SNOWFLAKE_PASSWORD') }}"
+    role: "{{ secret('SNOWFLAKE_ROLE') }}"
+    warehouse: "{{ secret('SNOWFLAKE_WAREHOUSE') }}"
+    database: S_CDATOS_PSET2
+    schema: S_CDATOS_PSET2_BRONZE
+    queryTag: "kestra-bronze-ingestion-{{ execution.id }}"
+    connectionPooling: false
+    sql: |
+      REMOVE @S_CDATOS_PSET2.S_CDATOS_PSET2_BRONZE.SMART_ARCHIVE_STAGE/kestra/{{ execution.id }}/
+
+#? ==========================================================================================
+#? FINALLY: se ejecuta SIEMPRE al terminar (exito o fallo). Borra los CSV temporales locales de
+#? esta ejecucion; si upload_day fallo, cleanup_day no llego a correr y quedarian en disco.
+#? ==========================================================================================
+finally:
+  - id: cleanup_local_workdir
+    type: io.kestra.plugin.scripts.shell.Commands
+    taskRunner:
+      type: io.kestra.plugin.core.runner.Process
+    commands:
+      - rm -rf "/tmp/kestra-wd/bronze/{{ execution.id }}"

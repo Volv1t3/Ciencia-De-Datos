@@ -55,6 +55,9 @@ services:
     image: kestra/kestra:v1.3.40
     #? root para poder escribir en los bind mounts y usar el socket de Docker.
     user: root
+    #? Los flows de src/main/kestra/flows los carga el servicio kestra-flow-sync (mas abajo).
+    #? No se usa --flow-path: en Kestra 1.3 carga los flows ANTES de registrar los plugins
+    #? externos y rechaza los que usan tareas de Snowflake o scripts.
     command: ["server", "standalone", "--config", "/etc/kestra/application.yml"]
     environment:
       #? Determinan la URL para la string de conexion JDBC para la base de management de Kestra
@@ -98,13 +101,43 @@ services:
     depends_on:
       kestra-postgres:
         condition: service_healthy
+    #? curl (no wget): la imagen de Kestra no trae wget y el healthcheck fallaba siempre (unhealthy).
     healthcheck:
-      test: ["CMD-SHELL", "wget -q --spider http://localhost:8081/health"]
+      test: ["CMD-SHELL", "curl --fail --silent http://localhost:8081/health > /dev/null"]
       interval: 10s
       timeout: 5s
       retries: 12
       start_period: 20s
     restart: unless-stopped
+    networks:
+      - data-platform
+
+  #? ----------------------------------------------------------------------------------------
+  #? Carga automatica de flows. Servicio de un solo uso: cuando Kestra esta sano, importa cada
+  #? src/main/kestra/flows/*.yml por la API (crea o actualiza) y termina. Asi el repositorio es
+  #? la fuente de verdad de los flows y no hay que pegarlos en la UI.
+  #? Tras editar un flow: docker compose --env-file src/res/env/.env up kestra-flow-sync
+  #? ----------------------------------------------------------------------------------------
+  kestra-flow-sync:
+    image: curlimages/curl:8.11.1
+    depends_on:
+      kestra:
+        condition: service_healthy
+    environment:
+      KESTRA_USER: ${KESTRA_BASIC_AUTH_USERNAME:?set KESTRA_BASIC_AUTH_USERNAME in .env}
+      KESTRA_PASSWORD: ${KESTRA_BASIC_AUTH_PASSWORD:?set KESTRA_BASIC_AUTH_PASSWORD in .env}
+    volumes:
+      - ./src/main/kestra/flows:/flows:ro
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >-
+        for f in /flows/*.yml; do
+        echo "importando $$f";
+        curl --fail --silent --show-error -u "$$KESTRA_USER:$$KESTRA_PASSWORD"
+        -X POST -F "fileUpload=@$$f" http://kestra:8080/api/v1/main/flows/import > /dev/null || exit 1;
+        done;
+        echo "flows sincronizados"
+    restart: "no"
     networks:
       - data-platform
 

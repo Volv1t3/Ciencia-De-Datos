@@ -30,3 +30,7 @@ kestra:
     tmp-dir:
       path: /tmp/kestra-wd/tmp
   url: http://localhost:8080/
+  #? Sin los 9 flows de ejemplo ("Getting Started") que Kestra crea por defecto.
+  #? Los flows del proyecto los carga el servicio kestra-flow-sync (docker-compose.yml).
+  tutorialFlows:
+    enabled: false

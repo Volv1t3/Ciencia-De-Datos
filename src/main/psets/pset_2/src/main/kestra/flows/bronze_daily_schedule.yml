@@ -1,0 +1,57 @@
+#? ==========================================================================================
+#? TRIGGER PROGRAMADO + BACKFILL HISTORICO de la ingesta SMART.
+#? ------------------------------------------------------------------------------------------
+#? Frecuencia: diaria a las 03:00 (la fuente publica UN archivo SMART por dia).
+#? Cada ejecucion carga el DIA ANTERIOR a su fecha programada llamando al flow bronze_ingestion
+#? (Subflow) con requested_start_date = requested_end_date = ese dia.
+#?
+#? Backfill: en la UI de Kestra -> Flows -> bronze_daily_schedule -> Triggers -> "Backfill
+#? executions", con inicio 2018-01-02 y fin 2020-01-01. Kestra crea una ejecucion por cada
+#? tick diario pasado y trigger.date toma esa fecha -> se carga 2018-01-01 .. 2019-12-31 dia por dia.
+#? Como el MERGE de Bronze es idempotente, repetir un backfill no duplica nada.
+#?
+#? Dataset historico: Tianchi solo cubre 2018-2019. Un tick con fecha fuera de ese rango (ej.
+#? el tick normal de hoy) no tiene archivo que cargar: registra un mensaje y termina en SUCCESS
+#? en vez de fallar todos los dias. Con una fuente viva, bastaria con quitar esa condicion.
+#? ==========================================================================================
+id: bronze_daily_schedule
+namespace: ssd_failure_prediction
+description: Daily schedule (and native Kestra backfill) that loads the previous SMART day into Bronze.
+
+#? Una a la vez: durante un backfill las ejecuciones quedan en cola y entran en orden.
+concurrency:
+  limit: 1
+
+#? Fecha a cargar: dia anterior a la fecha programada (trigger.date). Si se ejecuta a mano
+#? (sin trigger), se usa la fecha de inicio de la ejecucion.
+variables:
+  load_date: "{{ (trigger.date ?? execution.startDate) | dateAdd(-1, 'DAYS') | date('yyyy-MM-dd') }}"
+  load_year: "{{ (trigger.date ?? execution.startDate) | dateAdd(-1, 'DAYS') | date('yyyy') }}"
+
+tasks:
+  #? Solo hay datos para 2018 y 2019 (archivos smartlog2018ssd.zip / smartlog2019ssd.zip).
+  - id: if_day_has_source_data
+    type: io.kestra.plugin.core.flow.If
+    condition: "{{ render(vars.load_year) == '2018' or render(vars.load_year) == '2019' }}"
+    then:
+      #? Llama al flow de ingesta y ESPERA su resultado; si falla, esta ejecucion tambien falla.
+      - id: load_previous_day
+        type: io.kestra.plugin.core.flow.Subflow
+        namespace: ssd_failure_prediction
+        flowId: bronze_ingestion
+        wait: true
+        transmitFailed: true
+        inputs:
+          dataset: "smart_{{ render(vars.load_year) }}"
+          requested_start_date: "{{ render(vars.load_date) }}"
+          requested_end_date: "{{ render(vars.load_date) }}"
+    else:
+      - id: no_source_data_for_day
+        type: io.kestra.plugin.core.log.Log
+        message: "Sin archivo SMART para {{ render(vars.load_date) }} (la fuente cubre 2018-2019); nada que cargar."
+
+triggers:
+  #? Cron estandar: minuto hora dia mes dia_semana -> todos los dias a las 03:00 (hora del servidor).
+  - id: daily_at_0300
+    type: io.kestra.plugin.core.trigger.Schedule
+    cron: "0 3 * * *"
