@@ -1,8 +1,13 @@
+#? Imagen del contenedor 'spark' (EDA interactivo con Jupyter). Base oficial Apache Spark 4.0.4
+#? (Scala 2.13, Java 21, Python 3). Versiones fijadas -> build reproducible.
 FROM apache/spark:4.0.4-scala2.13-java21-python3-r-ubuntu
 
+#? root solo para instalar; al final se vuelve al usuario sin privilegios 'spark'.
 USER root
 
 # Spark 4.0.4 uses Scala 2.13. These are matching, pinned connector JARs.
+#? Conector spark-snowflake + driver JDBC de Snowflake, en versiones compatibles con Spark 4 / Scala 2.13.
+#? Se copian a /opt/spark/jars para que Spark los cargue automaticamente.
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends curl \
     && rm -rf /var/lib/apt/lists/* \
@@ -13,6 +18,7 @@ RUN apt-get update \
       --output /opt/spark/jars/snowflake-jdbc-4.0.2.jar \
       https://repo1.maven.org/maven2/net/snowflake/snowflake-jdbc/4.0.2/snowflake-jdbc-4.0.2.jar
 
+#? Librerias Python (Jupyter, pandas, pyarrow, graficos). El import de prueba hace fallar el build si algo no quedo instalado.
 COPY config/spark/requirements.txt /tmp/requirements.txt
 RUN /usr/bin/python3 -m pip install --no-cache-dir -r /tmp/requirements.txt \
     && /usr/bin/python3 -c "import ipykernel, jupyterlab, pandas, pyarrow" \
@@ -20,8 +26,10 @@ RUN /usr/bin/python3 -m pip install --no-cache-dir -r /tmp/requirements.txt \
     && mkdir -p /opt/spark/work /opt/spark/logs /opt/spark/notebooks \
     && chown -R spark:spark /opt/spark/work /opt/spark/logs /opt/spark/notebooks
 
+#? Kernel de Jupyter 'PySpark 4 + Snowflake' que usan los notebooks de EDA.
 COPY config/spark/kernels/pyspark-snowflake/kernel.json \
     /usr/local/share/jupyter/kernels/pyspark-snowflake/kernel.json
 
+#? Ejecutar como usuario sin privilegios.
 USER spark
 WORKDIR /opt/spark/work
