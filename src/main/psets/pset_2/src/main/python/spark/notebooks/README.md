@@ -106,5 +106,9 @@ ranking, null-pattern, and disk/model summaries remain exact warehouse
 aggregations. The two null tables export independently to
 `src/main/python/spark/notebooks/exports` on the host.
 
+A Spanish walkthrough of both notebook families (every EDA section with its
+Snowflake query and finding, and every null-analysis notebook with its result)
+is in [`docs/10_notebooks.md`](../../../../../docs/10_notebooks.md).
+
 For the conclusions derived from those exports, continue with the
 [SSD SMART null-structure analysis book](ssd_null_analysis_book/README.md).

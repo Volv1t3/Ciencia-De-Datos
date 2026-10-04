@@ -22,6 +22,7 @@ sigue en los README de cada carpeta; aquí se enlaza donde corresponde.
 | 7 | [Limitaciones](07_limitaciones.md) | Problemas de datos y de arquitectura no resueltos |
 | 8 | [Ejecución paso a paso](08_ejecucion.md) | Cómo levantar la infraestructura y correr Kestra, dbt y Spark |
 | 9 | [Mapa del código](09_mapa_del_codigo.md) | Qué hace cada archivo y dónde tocar para hacer cambios típicos |
+| 10 | [Notebooks](10_notebooks.md) | EDA en Spark (consultas con pushdown, sección por sección) y libro de análisis de nulos (notebook por notebook) |
 
 ## Resumen en una página
 
