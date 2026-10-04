@@ -1,0 +1,19 @@
+flowchart LR
+    Z[ZIP Tianchi] --> B1[(SMART_2018_RAW)]
+    Z --> B2[(SMART_2019_RAW)]
+    Z --> B3[(SSD_FAILURE_LABEL_RAW)]
+    B1 --> S1[(SMART_2018)]
+    B2 --> S2[(SMART_2019)]
+    B3 --> S3[(SSD_FAILURE_LABELS)]
+    S1 --> N1[(INT_..._NULL_PROCESSED)]
+    S2 --> N2[(INT_..._NULL_PROCESSED)]
+    S1 -.cuarentena.-> A1[(INT_AUDIT_..._2018)]
+    S2 -.cuarentena.-> A2[(INT_AUDIT_..._2019)]
+    N1 --> ALL[(SMART_NULL_PROCESSED_ALL_YEARS)]
+    N2 --> ALL
+    N1 --> M1[(INT_SMART_2018_MC1)] --> MC1[(SMART_MC1_ALL_YEARS)]
+    N2 --> M2[(INT_SMART_2019_MC1)] --> MC1
+    ALL --> DS[DIM_SSD] & DD[DIM_DATE] & FA[FCT_SMART_DAILY_ALL]
+    S3 --> DS & DD & FE[FCT_FAILURE_EVENT_ALL/MC1]
+    MC1 --> FM[FCT_SMART_DAILY_MC1]
+    FM & DS & DD & FE --> OBT[(OBT_MC1_RN / R / N)]

@@ -16,6 +16,9 @@ Todos los archivos de código tienen comentarios en español con el prefijo `#?`
 | `src/res/config/snowflake/bootstrap/00*.sql` | Bronze | Creación manual opcional de esquemas, formato, stage y tablas |
 | `src/main/kestra/flows/bronze_ingestion.yml` | Bronze | Flow de ingesta: DDL, plan, extracción, `PUT`, `MERGE` y reconciliación |
 | `src/main/kestra/flows/prepare_bronze.py` | Bronze | Valida el ZIP y el esquema; arma paquetes de días; extrae un CSV con linaje |
+| `src/main/kestra/flows/bronze_daily_schedule.yml` | Orquestación | Trigger diario a las 03:00 y backfill nativo: carga el día anterior con `bronze_ingestion` |
+| `src/main/kestra/flows/ssd_pipeline.yml` | Orquestación | Ingesta opcional → `dbt build` → OBT; trigger semanal |
+| `src/main/kestra/flows/docker_exec.py` | Orquestación | Ejecuta un comando en el contenedor de un servicio (como `docker compose exec`) usando la API de Docker |
 | `dbt/.../dbt_project.yml` | dbt | Materialización y esquema por carpeta |
 | `dbt/.../models/sources/sources.yml` | dbt | Declara las tablas Bronze como `source` |
 | `dbt/.../models/silver/smart_20XX.sql`, `ssd_failure_labels.sql` | Silver | Tipado incremental desde Bronze |
@@ -39,10 +42,11 @@ Todos los archivos de código tienen comentarios en español con el prefijo `#?`
 
 | Si te piden… | Archivo(s) | Después |
 | --- | --- | --- |
-| Agregar un trigger programado a la ingesta | `bronze_ingestion.yml`: bloque `triggers:` con `io.kestra.plugin.core.trigger.Schedule` y `inputs` fijos | Reimportar el flow |
-| Cambiar los reintentos | bloque `retry:` de la tarea en `bronze_ingestion.yml` | Reimportar el flow |
+| Cambiar la frecuencia de la ingesta o de la transformación | `cron` del trigger en `bronze_daily_schedule.yml` o en `ssd_pipeline.yml` | `docker compose up kestra-flow-sync` |
+| Agregar una etapa al pipeline (p. ej. entrenar el modelo) | Nueva tarea en `ssd_pipeline.yml` que llame a `docker_exec.py <servicio> <dir> <comando>` | `docker compose up kestra-flow-sync` |
+| Cambiar los reintentos | bloque `retry:` de la tarea en `bronze_ingestion.yml` | `docker compose up kestra-flow-sync` |
 | Recargar un rango de fechas (backfill) | Nada: inputs `requested_start_date` y `requested_end_date` al ejecutar | — |
-| Agregar o quitar una columna de la fuente | `SMART_HEADERS` en `prepare_bronze.py` **y** la lista `$5..$109` del `MERGE` | Reimportar el flow y recargar |
+| Agregar o quitar una columna de la fuente | `SMART_HEADERS` en `prepare_bronze.py` **y** la lista `$5..$109` del `MERGE` | `docker compose up kestra-flow-sync` y recargar |
 | Considerar "vacío" otro atributo SMART | `globally_unavailable_smart_attribute_ids()` o `mc1_unavailable_smart_attribute_ids()` | `dbt build`; si cambia MC1, actualizar `SMART_IDS` y los anchos esperados en `build_mc1_obt.py` |
 | Imputar nulos en vez de dejarlos | `*_null_processed.sql`: `coalesce(n_X, valor)`; justificar en [calidad de datos](03_calidad_de_datos.md) | `dbt build --select tag:null_processed+` |
 | Agregar una columna a una dimensión (p. ej. `is_holiday`) | `dim_date.sql` (+ test en `gold/schema.yml`) | `dbt build --select dim_date+` |

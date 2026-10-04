@@ -17,3 +17,6 @@ __pycache__/
 # Logs y directorios de trabajo generados en ejecucion (Spark event logs, dbt.log, temporales de Kestra)
 /src/res/logs/*/*
 !/src/res/logs/*/.gitkeep
+
+# Archivo que dbt genera junto al profiles.yml (id anonimo de uso)
+/src/res/config/dbt/profiles/.user.yml

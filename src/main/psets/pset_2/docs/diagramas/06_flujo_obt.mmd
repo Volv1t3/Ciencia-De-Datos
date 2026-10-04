@@ -1,0 +1,15 @@
+flowchart TD
+    G["Gold: FCT_SMART_DAILY_MC1 · FCT_FAILURE_EVENT_MC1 · DIM_SSD · DIM_DATE"] --> V1["Validar contrato<br/>44 columnas SMART numéricas"]
+    V1 --> V2["Validar grain de entrada<br/>filas = claves distintas = pares (SSD, fecha)"]
+    V2 --> V3["Integridad referencial<br/>dimensiones sin duplicados, sin huérfanos"]
+    V3 --> J["Join con DIM_SSD y DIM_DATE<br/>conteo después == conteo antes"]
+    J --> L["Etiquetas: primera falla, último día visto, TARGET_30D"]
+    J --> W["Ventanas 7/14/30 días: media, conteo, tendencia"]
+    L --> RN["OBT_MC1_RN (847 cols)"]
+    W --> RN
+    RN --> ST[("Stage OBT_MC1_RN__RUN_sufijo")]
+    ST --> VS["Validar lo PERSISTIDO"]
+    VS --> R[("Stage R, 429 cols")] & N[("Stage N, 429 cols")]
+    R & N --> P["Paridad R/N vs RN"]
+    P --> C["CREATE OR REPLACE ... CLONE<br/>OBT_MC1_RN / _R / _N"]
+    C --> AU[("OBT_MC1_RUN_AUDIT")]

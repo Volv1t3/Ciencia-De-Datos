@@ -37,19 +37,34 @@ docker compose --env-file src/res/env/.env ps          # todo debe estar "health
 
 | Interfaz | URL |
 | --- | --- |
-| Kestra | <http://localhost:8080> (usuario y clave `KESTRA_BASIC_AUTH_*`) |
+| Kestra | <http://localhost:8080> (`KESTRA_BASIC_AUTH_USERNAME` **debe ser un email**; clave de 8 caracteres o más, con mayúscula y número) |
 | dbt-ui | <http://localhost:5173> |
 | JupyterLab (EDA) | <http://127.0.0.1:4041> (con `JUPYTER_TOKEN`) |
 
 ## 3. Ingesta Bronze (Kestra)
 
-1. En Kestra: **Flows → Create → Import** →
-   `src/main/kestra/flows/bronze_ingestion.yml`. Si editas el YAML, hay que volver a importarlo;
-   el `.py` se lee del volumen en cada ejecución.
-2. **Execute**, una vez por dataset: primero `failure_labels` (es pequeño y sirve como prueba),
-   después `smart_2018` y `smart_2019`.
-3. Para hacer backfill de un rango, completa `requested_start_date` y `requested_end_date`.
-4. Comprueba el resultado en Snowflake:
+Los flows se importan solos: el servicio `kestra-flow-sync` los sube a Kestra al levantar
+Docker. Si editas un `.yml`, vuelve a sincronizar con:
+
+```bash
+docker compose --env-file src/res/env/.env up kestra-flow-sync
+```
+
+Los `.py` (`prepare_bronze.py`, `docker_exec.py`) se leen del volumen en cada ejecución, así que
+no hace falta sincronizar nada después de editarlos.
+
+**Opción A: pipeline completo de una vez.** Ejecuta `ssd_pipeline` con
+`datasets = [failure_labels, smart_2018, smart_2019]`. Hace la ingesta, después `dbt build` y
+por último la OBT; si falla una etapa, no se ejecuta la siguiente.
+
+**Opción B: por partes.**
+
+1. Ejecuta `bronze_ingestion` una vez por dataset: primero `failure_labels` (es pequeño y sirve
+   como prueba), después `smart_2018` y `smart_2019`.
+2. Para un rango, completa `requested_start_date` y `requested_end_date`. Para un backfill día
+   por día, usa *Triggers → Backfill executions* en `bronze_daily_schedule` (ver
+   [Ingesta](02_ingesta_kestra.md#backfill-de-datos-históricos)).
+3. Comprueba el resultado en Snowflake:
 
 ```sql
 SELECT COUNT(*) FROM S_CDATOS_PSET2.S_CDATOS_PSET2_BRONZE.SSD_FAILURE_LABEL_RAW;
@@ -58,6 +73,9 @@ GROUP BY 1 ORDER BY 1 LIMIT 10;
 ```
 
 ## 4. Silver y Gold (dbt)
+
+Desde Kestra: ejecuta `ssd_pipeline` sin datasets. También corre solo cada lunes a las 06:00.
+Desde la terminal:
 
 ```bash
 # Probar la conexión
