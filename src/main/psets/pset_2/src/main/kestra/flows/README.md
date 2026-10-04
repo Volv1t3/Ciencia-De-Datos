@@ -62,9 +62,16 @@ encodings, dates, and hidden archive metadata before upload.
 
 ## Trigger, retries, and historical backfill
 
-The flow is triggered manually because the authenticated Alibaba/Tianchi source
-does not expose a stable API or download endpoint. Once an archive is placed in
-the read-only landing directory, ingestion is automated.
+[`bronze_daily_schedule.yml`](bronze_daily_schedule.yml) has a daily `Schedule`
+trigger (03:00) that loads the previous day through `bronze_ingestion` as a
+subflow. Kestra's native trigger backfill (Triggers → Backfill executions, from
+2018-01-02 to 2020-01-01) replays the whole historical range one day per
+execution. Ticks outside the 2018–2019 source coverage log "no data" and succeed.
+Archive download stays manual because the authenticated Alibaba/Tianchi source
+exposes no API; once an archive is in the read-only landing directory, ingestion
+is automated. [`ssd_pipeline.yml`](ssd_pipeline.yml) orchestrates ingestion →
+`dbt build` → MC1 OBT (weekly schedule or manual) and runs dbt and Spark inside
+their own containers through [`docker_exec.py`](docker_exec.py).
 
 Deterministic errors—missing ZIPs, unexpected schemas, malformed rows, invalid
 UTF-8, or invalid date ranges—fail immediately. Transient Snowflake DDL, upload,
@@ -79,9 +86,12 @@ source hash changes.
 
 ## Execution
 
-Import `bronze_ingestion.yml` through Kestra after source changes. A mounted YAML
-file is editable inside the container, but a bind mount does not automatically
-register or update a flow in Kestra.
+Flows are imported automatically by the one-shot `kestra-flow-sync` Compose
+service. After editing a YAML file, rerun it with
+`docker compose --env-file src/res/env/.env up kestra-flow-sync`. Python helpers
+are read from the bind mount on every execution. Successful executions remove
+their files from the Snowflake stage; a `finally` block always deletes local
+temporary CSV files.
 
 For environment setup, ports, secrets, and Snowflake bootstrap requirements,
 return to the [project README](../../../../README.md). After Bronze is populated,

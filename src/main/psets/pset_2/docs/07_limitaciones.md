@@ -17,10 +17,10 @@
 
 | Limitación | Impacto | Posible solución |
 | --- | --- | --- |
-| **Trigger manual** de la ingesta | Alguien debe dejar el ZIP y pulsar *Execute* | Trigger `Schedule` diario o trigger por archivo nuevo en la *landing zone* |
-| **Kestra solo orquesta la ingesta** | dbt y Spark se ejecutan con comandos aparte; no hay un DAG único Bronze → OBT | Flow de orquestación que encadene ingesta → `dbt build` → job OBT |
-| **Los archivos del stage no se borran** después del `MERGE` | El stage `SMART_ARCHIVE_STAGE` acumula una carpeta por ejecución (costo de almacenamiento) | Tarea `REMOVE @stage/kestra/<execution.id>/` al final del flow (el README de Kestra ya la menciona en el diagrama) |
-| Si `upload_day` falla, `cleanup_day` no se ejecuta | Pueden quedar CSV temporales en `src/res/logs/kestra` | Mover la limpieza a un bloque `finally`/`errors` del flow |
+| La descarga de los ZIP es manual | Tianchi exige iniciar sesión y no tiene API | Con una fuente con API, una tarea HTTP de Kestra antes de `prepare_bronze` |
+| El tick diario no tiene datos fuera de 2018–2019 | Registra "sin datos" (`SUCCESS`); el valor real del trigger se ve con el backfill | Con una fuente viva, quitar la condición de año en `bronze_daily_schedule` |
+| Kestra invoca dbt y Spark por el socket de Docker (`docker_exec.py`) | El socket da a Kestra control total de Docker en la máquina (equivale a root) | Aceptable en local; en producción, task runners de Kubernetes o un servicio con permisos acotados |
+| `dbt-ui-backend` y `snowpark-connect` deben estar levantados para `ssd_pipeline` | Si no lo están, `dbt_build` falla con un mensaje claro | `docker compose up -d` levanta todo |
 | El incremental de Silver usa `INGESTED_AT > max(...)` | No es CDC completo: si cambia la lógica de parseo hay que hacer `--full-refresh` | Documentado; correr `dbt build --full-refresh` tras cambios de lógica |
 | La lista de atributos SMART está repetida (ingesta, `smart_attribute_columns`, `smart_attribute_ids`, `SMART_IDS` en Spark) | Agregar un atributo exige tocar varios lugares | Centralizar en una variable de dbt (`vars`) o en un archivo de configuración |
 | Gold y Silver procesada se reconstruyen completos en cada `dbt build` | Más cómputo que un incremental | Aceptable con este volumen; se podría pasar a incremental por fecha |

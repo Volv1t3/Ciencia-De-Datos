@@ -35,7 +35,10 @@ flowchart TD
     M --> V["verify_load: filas del stage ausentes en Bronze"]
     V --> F{"MISSING_ROWS > 0 ?"}
     F -->|sí| X["fail_if_incomplete → FAILED"]
-    F -->|no| OK["SUCCESS"]
+    F -->|no| RM["remove_execution_stage_files<br/>REMOVE del stage"]
+    RM --> OK["SUCCESS"]
+    X -.-> FIN["finally: borrar temporales locales"]
+    OK -.-> FIN
 ```
 
 1. **Validar antes de cargar** (`prepare_bronze.py`). Antes de subir nada se exigen la cabecera
@@ -61,16 +64,28 @@ uno por uno y el CSV local se borra apenas se sube, de modo que en disco solo ex
 
 ## Trigger y frecuencia
 
-- **Implementado: trigger manual** (botón *Execute* o la API de Kestra) con
-  `concurrency.limit: 1`, para que nunca corran dos cargas en paralelo sobre las mismas tablas.
-- **Justificación:** Tianchi es un dataset **histórico y cerrado** (2018–2019). Se descarga con
-  sesión iniciada y no tiene endpoint estable ni publicación periódica, así que no hay datos
-  nuevos que esperar con un `cron`. La única acción manual es dejar el ZIP en la *landing zone*;
-  validación, partición, carga, reconciliación y reintentos son automáticos.
-- **Frecuencia razonable si la fuente fuera viva:** diaria, porque la fuente genera un archivo
-  por día. Se agregaría un trigger `Schedule` (`cron: "0 3 * * *"`) que cargue el día anterior
-  usando `requested_start_date = requested_end_date = ayer`, o un trigger por archivo nuevo en la
-  *landing zone*.
+Hay tres flows en el namespace `ssd_failure_prediction`. Todos se importan solos al levantar
+Docker, gracias al servicio `kestra-flow-sync`.
+
+| Flow | Trigger | Qué hace |
+| --- | --- | --- |
+| [`bronze_daily_schedule`](../src/main/kestra/flows/bronze_daily_schedule.yml) | **`Schedule` diario a las 03:00** (`cron: "0 3 * * *"`) | Carga el **día anterior** a la fecha programada, llamando a `bronze_ingestion` como *subflow* |
+| [`bronze_ingestion`](../src/main/kestra/flows/bronze_ingestion.yml) | Llamado por los otros dos flows, o manual | Carga un dataset completo o un rango de fechas |
+| [`ssd_pipeline`](../src/main/kestra/flows/ssd_pipeline.yml) | **`Schedule` semanal, lunes 06:00**, o manual | Ingesta opcional → `dbt build` (modelos + tests) → OBT |
+
+- **Por qué diario:** la fuente genera **un archivo SMART por día**, así que el lote diario es la
+  unidad natural. Ejecutar más seguido no traería datos nuevos.
+- **Por qué la transformación es semanal:** reconstruir Silver/Gold y la OBT completa cada día
+  costaría cómputo de Snowflake sin cambiar decisiones, porque el horizonte de predicción es de
+  30 días (ver [batch vs. streaming](06_batch_vs_streaming.md)). Se puede ejecutar a mano en
+  cualquier momento.
+- **Dataset histórico:** Tianchi solo cubre 2018–2019. Cuando el tick diario cae en una fecha
+  sin archivo (por ejemplo, la de hoy), el flow registra "sin datos" y termina en `SUCCESS` en
+  vez de fallar todos los días. Con una fuente viva bastaría con quitar esa condición.
+- **Única acción manual:** dejar los ZIP en `src/res/data/raw`. Tianchi exige iniciar sesión y
+  no tiene API, así que la descarga no se puede automatizar.
+- `concurrency.limit: 1` en los tres flows: nunca hay dos cargas sobre las mismas tablas; las
+  ejecuciones extra quedan en cola.
 
 ## Manejo de errores y retries
 
@@ -91,22 +106,45 @@ Parámetros de retry:
 Con `warningOnRetry: true`, una ejecución que necesitó reintentos queda en estado `WARNING` en
 vez de `SUCCESS`. El problema queda visible aunque se haya recuperado.
 
+**Limpieza:**
+
+- Después de reconciliar, `remove_execution_stage_files` borra con `REMOVE` los archivos de esa
+  ejecución en el *stage*. Si la ejecución falla antes, se conservan para investigar.
+- El bloque `finally` borra **siempre** los CSV temporales locales, aunque la ejecución haya
+  fallado a mitad de camino.
+
+**Orquestación (`ssd_pipeline`):** si falla la ingesta, no se ejecuta dbt; si falla un modelo o
+un test de dbt (por ejemplo, un duplicado que rompe el grain), no se construye la OBT. `dbt_build`
+tiene un reintento por si el error es transitorio, y el bloque `errors` deja el fallo registrado
+en el log.
+
 ## Backfill de datos históricos
 
-- Los inputs `requested_start_date` y `requested_end_date` (formato `YYYY-MM-DD`, inclusivos)
-  filtran qué días del ZIP se cargan. Si se dejan vacíos, se carga el año completo.
-- **Es idempotente.** El `MERGE` usa como clave `(SOURCE_ARCHIVE, SOURCE_FILE, SOURCE_ROW)`:
-  - una fila nueva se **inserta**;
-  - una fila igual (mismo `SOURCE_SHA256`) **no se toca**, así que recargar no duplica nada;
-  - una fila con contenido distinto se **actualiza** y se renueva su `INGESTED_AT`.
-- **Nunca hay `DELETE`.** Si una versión posterior del archivo omite una fila, Bronze conserva la
-  histórica.
-- Silver detecta solo lo nuevo, porque su filtro incremental es
-  `INGESTED_AT > max(bronze_ingested_at)`.
+Hay dos formas, y ambas son seguras de repetir:
+
+1. **Backfill nativo de Kestra sobre el trigger diario:** en la UI, *Flows →
+   bronze_daily_schedule → Triggers → Backfill executions*, con inicio `2018-01-02` y fin
+   `2020-01-01`. Kestra crea una ejecución por cada tick diario pasado, y cada una carga el día
+   anterior: así se recorre 2018-01-01 … 2019-12-31 día por día, en cola y en orden.
+2. **Por rango, en una sola ejecución:** se ejecuta `bronze_ingestion` (o `ssd_pipeline`) con
+   `requested_start_date` y `requested_end_date` (`YYYY-MM-DD`, inclusivos). Si se dejan vacíos,
+   se carga el año completo, en paralelo por bimestres.
+
+En los dos casos el `MERGE` es **idempotente**. Su clave es
+`(SOURCE_ARCHIVE, SOURCE_FILE, SOURCE_ROW)`:
+
+- una fila nueva se **inserta**;
+- una fila igual (mismo `SOURCE_SHA256`) **no se toca**, así que recargar no duplica nada;
+- una fila con contenido distinto se **actualiza** y se renueva su `INGESTED_AT`.
+
+Además, **nunca hay `DELETE`**: si una versión posterior del archivo omite una fila, Bronze
+conserva la histórica. Silver detecta solo lo nuevo con su filtro incremental
+`INGESTED_AT > max(bronze_ingested_at)`.
 
 Ejemplo: recargar la primera semana de marzo de 2019.
 
 ```text
+flow = bronze_ingestion
 dataset = smart_2019
 requested_start_date = 2019-03-01
 requested_end_date   = 2019-03-07

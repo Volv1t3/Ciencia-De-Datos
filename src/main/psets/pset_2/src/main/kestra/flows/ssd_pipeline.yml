@@ -1,0 +1,120 @@
+#? ==========================================================================================
+#? ORQUESTACION END-TO-END:  Bronze (Kestra) -> Silver/Gold (dbt) -> OBT (Spark)
+#? ------------------------------------------------------------------------------------------
+#? Un solo flow que encadena las tres etapas y se detiene en la primera que falle:
+#?   1. ingest_bronze  : (opcional) un Subflow bronze_ingestion por cada dataset elegido.
+#?   2. dbt_build      : "dbt build" = modelos + tests en orden del DAG. Si un test falla (ej.
+#?                       un duplicado rompe el grain), la OBT NO se construye.
+#?   3. build_obt      : job Spark (Snowpark Connect) que valida y publica OBT_MC1_RN/R/N.
+#? dbt y Spark corren en SUS contenedores (dbt-ui-backend, snowpark-connect) mediante
+#? docker_exec.py, que usa el socket de Docker montado en Kestra. Esos servicios deben estar
+#? levantados (docker compose up -d).
+#?
+#? Disparo:
+#?   - Manual: Execute con los inputs (ej. carga inicial completa: los 3 datasets).
+#?   - Programado: semanal (lunes 06:00) sin ingesta, porque la ingesta diaria la hace
+#?     bronze_daily_schedule; reconstruye Silver/Gold con lo nuevo y regenera la OBT.
+#? ==========================================================================================
+id: ssd_pipeline
+namespace: ssd_failure_prediction
+description: End-to-end orchestration - optional Bronze ingestion, dbt build (models + tests) and the MC1 OBT job.
+
+concurrency:
+  limit: 1
+
+inputs:
+  #? Datasets a ingerir antes de transformar. Vacio = no ingerir (usar lo que ya esta en Bronze).
+  - id: datasets
+    type: MULTISELECT
+    values: [failure_labels, smart_2018, smart_2019]
+    required: false
+    description: Datasets to (re)load into Bronze before transforming. Empty = skip ingestion.
+  #? Rango opcional de backfill que se pasa a cada ingesta SMART.
+  - id: requested_start_date
+    type: STRING
+    required: false
+  - id: requested_end_date
+    type: STRING
+    required: false
+  #? full_refresh = reconstruir Silver incremental desde cero (tras cambiar logica de parseo).
+  - id: dbt_full_refresh
+    type: BOOL
+    defaults: false
+  - id: build_obt
+    type: BOOL
+    defaults: true
+
+variables:
+  dbt_bin: /opt/dbt-ui/backend/.venv/bin/dbt
+  dbt_project: /workspace/dbt-projects/ssd_failure_prediction
+
+tasks:
+  #? ---------------------------------------------------------------------------------------
+  #? 1) Ingesta (opcional). Secuencial: bronze_ingestion ya paraleliza por dentro y tiene
+  #?    concurrency 1. transmitFailed -> si una ingesta falla, el pipeline se detiene aqui.
+  #? ---------------------------------------------------------------------------------------
+  - id: ingest_bronze
+    type: io.kestra.plugin.core.flow.ForEach
+    values: "{{ inputs.datasets ?? [] }}"
+    concurrencyLimit: 1
+    tasks:
+      - id: ingest_dataset
+        type: io.kestra.plugin.core.flow.Subflow
+        namespace: ssd_failure_prediction
+        flowId: bronze_ingestion
+        wait: true
+        transmitFailed: true
+        inputs:
+          dataset: "{{ taskrun.value }}"
+          requested_start_date: "{{ inputs.requested_start_date ?? '' }}"
+          requested_end_date: "{{ inputs.requested_end_date ?? '' }}"
+
+  #? ---------------------------------------------------------------------------------------
+  #? 2) dbt build: Silver -> Gold con todos los tests. Retry 1 vez ante errores transitorios
+  #?    (red/warehouse); un test fallido vuelve a fallar igual y detiene el pipeline.
+  #? ---------------------------------------------------------------------------------------
+  - id: dbt_build
+    type: io.kestra.plugin.scripts.shell.Commands
+    taskRunner:
+      type: io.kestra.plugin.core.runner.Process
+    retry:
+      type: constant
+      interval: PT1M
+      maxAttempts: 2
+      warningOnRetry: true
+    commands:
+      - >-
+        python3 /workspace/kestra/flows/docker_exec.py dbt-ui-backend {{ vars.dbt_project }}
+        {{ vars.dbt_bin }} build --profiles-dir /home/dbtui/.dbt
+        {{ inputs.dbt_full_refresh ? '--full-refresh' : '' }}
+
+  #? ---------------------------------------------------------------------------------------
+  #? 3) OBT: solo si dbt termino bien (las tareas son secuenciales). Sin retry automatico: el
+  #?    job ya distingue validacion (codigo 2) de ejecucion (codigo 3) y deja auditoria.
+  #? ---------------------------------------------------------------------------------------
+  - id: if_build_obt
+    type: io.kestra.plugin.core.flow.If
+    condition: "{{ inputs.build_obt }}"
+    then:
+      - id: build_mc1_obt
+        type: io.kestra.plugin.scripts.shell.Commands
+        taskRunner:
+          type: io.kestra.plugin.core.runner.Process
+        commands:
+          - python3 /workspace/kestra/flows/docker_exec.py snowpark-connect /opt/spark/work python /opt/spark/jobs/build_mc1_obt.py
+
+#? Si cualquier etapa falla, deja un mensaje claro en el log de la ejecucion.
+errors:
+  - id: log_pipeline_failure
+    type: io.kestra.plugin.core.log.Log
+    level: ERROR
+    message: "ssd_pipeline fallo en la ejecucion {{ execution.id }}; revisar la primera tarea en estado FAILED."
+
+triggers:
+  #? Lunes 06:00: reconstruye Silver/Gold y la OBT con lo que la ingesta diaria dejo en Bronze.
+  - id: weekly_transform
+    type: io.kestra.plugin.core.trigger.Schedule
+    cron: "0 6 * * 1"
+    inputs:
+      dbt_full_refresh: false
+      build_obt: true

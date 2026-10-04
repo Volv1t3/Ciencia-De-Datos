@@ -122,10 +122,17 @@ DataGrip must connect to that remote Jupyter URL and use the
 `PySpark 4 + Snowflake` kernel; its local Python interpreter does not contain
 the container's Spark runtime or mounted connector helpers.
 
-Import `src/main/kestra/flows/bronze_ingestion.yml` in the Kestra UI
-(Flows → Create → Import). It validates and consolidates the selected CSV
-members, uploads CSV to the internal Snowflake stage, and idempotently merges
-source-faithful `VARIANT` objects into the three Bronze destination tables.
+The one-shot `kestra-flow-sync` service imports every `src/main/kestra/flows/*.yml`
+through the Kestra API as soon as Kestra is healthy, so no flow is pasted into the
+UI. After editing a flow, run `docker compose --env-file src/res/env/.env up
+kestra-flow-sync`. `KESTRA_BASIC_AUTH_USERNAME` must be a valid email address;
+Kestra 1.3 otherwise leaves basic authentication uninitialized.
+
+`bronze_ingestion` validates and consolidates the selected CSV members, uploads
+CSV to the internal Snowflake stage, and idempotently merges source-faithful
+`VARIANT` objects into the three Bronze destination tables.
+`bronze_daily_schedule` runs it every day for the previous day (and supports
+Kestra backfills), and `ssd_pipeline` chains ingestion → `dbt build` → MC1 OBT.
 
 ## Validation
 
@@ -294,10 +301,13 @@ as `__MACOSX/._ssd_failure_label.csv`.
 
 ### Trigger, error handling, and backfill
 
-Bronze ingestion is started manually because Alibaba/Tianchi does not provide a
-stable endpoint that Kestra can poll for these archives. After an archive is
-placed in the landing directory, validation, partitioning, upload, merge, and
-reconciliation are automated. Deterministic source errors fail immediately;
+`bronze_daily_schedule` triggers ingestion daily at 03:00 for the previous day,
+and Kestra's native trigger backfill replays 2018-01-01..2019-12-31 day by day.
+Ticks outside the 2018–2019 source coverage log "no data" and succeed. Archive
+download remains manual because Alibaba/Tianchi requires an authenticated session
+and exposes no API; after an archive is placed in the landing directory,
+validation, partitioning, upload, merge, reconciliation, and stage cleanup are
+automated. Deterministic source errors fail immediately;
 transient Snowflake DDL, `PUT`, and `MERGE` operations use bounded exponential
 retries.
 

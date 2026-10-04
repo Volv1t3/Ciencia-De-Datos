@@ -24,6 +24,10 @@ sigue en los README de cada carpeta; aquí se enlaza donde corresponde.
 | 9 | [Mapa del código](09_mapa_del_codigo.md) | Qué hace cada archivo y dónde tocar para hacer cambios típicos |
 | 10 | [Notebooks](10_notebooks.md) | EDA en Spark (consultas con pushdown, sección por sección) y libro de análisis de nulos (notebook por notebook) |
 
+Los diagramas también están exportados como imagen en [`diagramas/`](diagramas), en `.png` y
+`.svg`, para pegarlos en el memo PDF. Las fuentes son los `.mmd`; se regeneran con
+`docker run --rm -v "$PWD/docs/diagramas:/data" minlag/mermaid-cli:11.4.2 -i /data/<archivo>.mmd -o /data/<archivo>.png -b white -s 2`.
+
 ## Resumen en una página
 
 - **Problema:** predecir si un SSD del modelo **MC1** fallará en los próximos **30 días** a partir
@@ -33,8 +37,10 @@ sigue en los README de cada carpeta; aquí se enlaza donde corresponde.
   Un CSV por día con 105 columnas: `disk_id`, `ds` (fecha), `model` y 51 atributos SMART, cada
   uno en versión *raw* (`r_X`) y *normalizada* (`n_X`).
 - **Bronze (Kestra):** cada fila del CSV se guarda tal cual (texto dentro de un `VARIANT`) con
-  linaje (`archivo`, `fila`, `hash`). La carga es idempotente (`MERGE`) y tiene reintentos,
-  backfill por rango de fechas y una reconciliación final.
+  linaje (`archivo`, `fila`, `hash`). La carga es idempotente (`MERGE`) y tiene reintentos, una
+  reconciliación final, un trigger diario y backfill (nativo de Kestra o por rango de fechas).
+- **Orquestación (Kestra):** el flow `ssd_pipeline` encadena ingesta → `dbt build` → OBT y se
+  ejecuta solo cada semana. Los flows se importan solos al levantar Docker.
 - **Silver (dbt):** tipado con `TRY_TO_*`. Se eliminan los 17 atributos SMART que están 100 %
   vacíos, las filas sin ninguna medición pasan a cuarentena (no se borran) y los nulos parciales
   **no se imputan**. Hay además un subconjunto MC1 con 44 columnas.

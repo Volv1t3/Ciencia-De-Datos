@@ -1,0 +1,16 @@
+flowchart TD
+    I["Execute: dataset + fechas opcionales"] --> DDL["DDL idempotente<br/>FILE FORMAT · STAGE · 3 tablas RAW"]
+    DDL --> P["plan_partitions (Python)<br/>días → paquetes de 2 meses"]
+    P --> W{"partition_workers<br/>hasta 6 en paralelo"}
+    W --> E["prepare_day: extraer y validar 1 CSV"]
+    E --> U["upload_day: PUT al stage (.csv.gz)"]
+    U --> C["cleanup_day: borrar CSV local"]
+    C -->|"siguiente día del paquete"| E
+    C --> M["merge_csv: MERGE stage → *_RAW"]
+    M --> V["verify_load: filas del stage ausentes en Bronze"]
+    V --> F{"MISSING_ROWS > 0 ?"}
+    F -->|sí| X["fail_if_incomplete → FAILED"]
+    F -->|no| RM["remove_execution_stage_files<br/>REMOVE del stage"]
+    RM --> OK["SUCCESS"]
+    X -.-> FIN["finally: borrar temporales locales"]
+    OK -.-> FIN

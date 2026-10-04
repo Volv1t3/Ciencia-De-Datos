@@ -1,0 +1,36 @@
+flowchart LR
+    subgraph HOST["Máquina local (docker-compose.yml)"]
+        RAW[/"src/res/data/raw<br/>3 ZIP de Tianchi<br/>(montado solo lectura)"/]
+        subgraph KES["Orquestación"]
+            K["kestra<br/>v1.3.40 standalone<br/>:8080 UI · :8081 health"]
+            PG[("kestra-postgres<br/>estado, flows, cola")]
+            FS["kestra-flow-sync<br/>importa flows del repo"]
+        end
+        subgraph DBT["Transformación"]
+            DUI["dbt-ui<br/>nginx :5173"]
+            DBE["dbt-ui-backend<br/>dbt Core 1.12.5<br/>+ dbt-snowflake"]
+        end
+        subgraph SPK["Procesamiento"]
+            SP["spark<br/>Spark 4.0.4 + Jupyter<br/>EDA :4041 · UI :4040"]
+            SC["snowpark-connect<br/>PySpark 3.5.6<br/>job de la OBT"]
+        end
+    end
+    subgraph SF["Snowflake (nube) · base S_CDATOS_PSET2"]
+        BR[("S_CDATOS_PSET2_BRONZE<br/>*_RAW + stage")]
+        SI[("S_CDATOS_PSET2_SILVER")]
+        GO[("S_CDATOS_PSET2_GOLD")]
+        OB[("S_CDATOS_PSET2_OBT")]
+    end
+    RAW --> K
+    K <--> PG
+    FS -- "API /flows/import" --> K
+    K -- "docker_exec: dbt build" --> DBE
+    K -- "docker_exec: build_mc1_obt.py" --> SC
+    K -- "PUT + MERGE (JDBC)" --> BR
+    DUI --> DBE
+    DBE -- "dbt build" --> SI
+    DBE -- "dbt build" --> GO
+    BR -. source() .-> DBE
+    SC -- "DataFrames ejecutados en Snowflake" --> GO
+    SC -- "CLONE de tablas validadas" --> OB
+    SP -. "EDA (pushdown)" .-> SI

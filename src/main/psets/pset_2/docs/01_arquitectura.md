@@ -11,6 +11,7 @@ flowchart LR
         subgraph KES["Orquestación"]
             K["kestra<br/>v1.3.40 standalone<br/>:8080 UI · :8081 health"]
             PG[("kestra-postgres<br/>estado, flows, cola")]
+            FS["kestra-flow-sync<br/>importa flows del repo"]
         end
         subgraph DBT["Transformación"]
             DUI["dbt-ui<br/>nginx :5173"]
@@ -29,6 +30,9 @@ flowchart LR
     end
     RAW --> K
     K <--> PG
+    FS -- "API /flows/import" --> K
+    K -- "docker_exec: dbt build" --> DBE
+    K -- "docker_exec: build_mc1_obt.py" --> SC
     K -- "PUT + MERGE (JDBC)" --> BR
     DUI --> DBE
     DBE -- "dbt build" --> SI
@@ -47,14 +51,21 @@ que no quedan expuestos a la red local.
 
 | Servicio | Imagen | Rol en el pipeline | Por qué así |
 | --- | --- | --- | --- |
-| `kestra` | `kestra/kestra:v1.3.40` | Ingesta Bronze: valida los ZIP, sube los CSV diarios y hace el `MERGE` | Versión fija para que sea reproducible; modo standalone, suficiente para trabajo local |
+| `kestra` | `kestra/kestra:v1.3.40` | Ingesta Bronze y **orquestación de todo el pipeline** (ingesta → dbt → OBT) | Versión fija para que sea reproducible; modo standalone, suficiente para trabajo local |
 | `kestra-postgres` | `postgres:17-alpine` | Repositorio y cola de Kestra | Los flows y el historial de ejecuciones sobreviven a un reinicio (con H2 se perderían) |
+| `kestra-flow-sync` | `curlimages/curl` | Al arrancar, importa `src/main/kestra/flows/*.yml` por la API de Kestra y termina | El repo es la fuente de verdad de los flows; no hay que pegarlos a mano en la UI |
 | `dbt-ui-backend` | propia (`Dockerfile.semana05.backend`) | dbt Core + adaptador Snowflake; construye Silver y Gold | Reutiliza la interfaz de dbt de la semana 05; versiones fijadas como argumentos de build |
 | `dbt-ui` | propia (`Dockerfile.semana05.frontend`) | Interfaz web para ejecutar dbt | Conveniencia; el que ejecuta dbt es el backend |
 | `spark` | `apache/spark:4.0.4` + conector | Jupyter para el EDA sobre Silver | El conector `spark-snowflake` con *pushdown* evita traer las tablas completas a la máquina |
 | `snowpark-connect` | propia (`Dockerfile.pset2.snowpark`) | Construye la OBT con la API de PySpark | El plan se ejecuta **dentro de Snowflake**: ~115 millones de filas MC1 no caben en un contenedor local |
 
 ## Flujo de datos
+
+Kestra orquesta las cuatro etapas con tres flows (ver [Ingesta](02_ingesta_kestra.md)):
+`bronze_daily_schedule` (trigger diario y backfill), `bronze_ingestion` (carga de un dataset o
+rango) y `ssd_pipeline` (ingesta → `dbt build` → OBT). dbt y Spark se ejecutan en sus propios
+contenedores; Kestra los invoca con [`docker_exec.py`](../src/main/kestra/flows/docker_exec.py)
+a través del socket de Docker.
 
 1. **Fuente → Bronze.** Los ZIP se copian a `src/res/data/raw` (Tianchi exige iniciar sesión y
    no ofrece una API). El flow `bronze_ingestion` de Kestra valida cada CSV, le agrega linaje,

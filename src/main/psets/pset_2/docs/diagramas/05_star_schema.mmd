@@ -1,0 +1,39 @@
+erDiagram
+    DIM_SSD ||--o{ FCT_SMART_DAILY_MC1 : ssd_key
+    DIM_DATE ||--o{ FCT_SMART_DAILY_MC1 : observation_date_key
+    DIM_SSD ||--o{ FCT_SMART_DAILY_ALL : ssd_key
+    DIM_DATE ||--o{ FCT_SMART_DAILY_ALL : observation_date_key
+    DIM_SSD ||--o{ FCT_FAILURE_EVENT_MC1 : ssd_key
+    DIM_DATE ||--o{ FCT_FAILURE_EVENT_MC1 : failure_date_key
+    DIM_SSD ||--o{ FCT_FAILURE_EVENT_ALL : ssd_key
+    DIM_DATE ||--o{ FCT_FAILURE_EVENT_ALL : failure_date_key
+    DIM_SSD {
+        varchar ssd_key PK "SHA-256(disk_id|model_code)"
+        number disk_id "clave de negocio (1/2)"
+        varchar model_code "clave de negocio (2/2)"
+    }
+    DIM_DATE {
+        number date_key PK "YYYYMMDD"
+        date full_date UK
+        number year
+        number quarter
+        number month
+        number week_of_year
+        number day_of_week "ISO 1-7"
+        boolean is_weekend
+    }
+    FCT_SMART_DAILY_MC1 {
+        varchar smart_daily_key PK "SHA-256(ssd_key|fecha)"
+        varchar ssd_key FK
+        number observation_date_key FK
+        date observation_date
+        number n_X_r_X "44 medidas SMART"
+    }
+    FCT_FAILURE_EVENT_MC1 {
+        varchar failure_event_key PK
+        varchar ssd_key FK
+        number failure_date_key FK
+        date failure_date
+        timestamp failure_at
+        number failure_count "siempre 1"
+    }
