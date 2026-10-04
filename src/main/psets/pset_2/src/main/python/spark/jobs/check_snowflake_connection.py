@@ -1,5 +1,7 @@
 """Verify Spark connector access to the configured Snowflake warehouse."""
 
+#? Prueba de conexion real: ejecuta un SELECT en Snowflake con el conector de Spark y muestra
+#? cuenta, rol, warehouse, base y esquema activos. Util para diagnosticar credenciales del .env.
 from snowflake_io import create_spark_session, read_snowflake_query
 
 

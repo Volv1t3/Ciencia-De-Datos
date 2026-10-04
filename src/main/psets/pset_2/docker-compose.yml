@@ -1,6 +1,26 @@
+#? ==========================================================================================
+#? INFRAESTRUCTURA LOCAL DEL PSET 2
+#? ------------------------------------------------------------------------------------------
+#? Snowflake NO corre aqui: es el destino externo (nube). Localmente levantamos:
+#?   kestra-postgres  -> base de datos interna de Kestra (flows, ejecuciones, logs, cola)
+#?   kestra           -> orquestador; ejecuta el flow de ingesta Bronze
+#?   dbt-ui-backend   -> dbt Core + adaptador Snowflake (construye Silver y Gold) + API
+#?   dbt-ui           -> interfaz web para correr dbt (nginx que llama al backend)
+#?   spark            -> Spark 4 + JupyterLab, para EDA interactivo con el conector Snowflake
+#?   snowpark-connect -> Spark 3.5 + Snowpark Connect: corre el job que construye la OBT;
+#?                       el codigo es PySpark pero el computo pesado lo ejecuta Snowflake.
+#? Uso: docker compose --env-file src/res/env/.env up -d
+#? Todos los puertos se publican solo en 127.0.0.1 (no quedan expuestos a la red local).
+#? ==========================================================================================
+
+#? Nombre del proyecto compose (prefijo de contenedores, volumenes y redes).
 name: ciencia-de-datos-ssd-failure-pipeline-pset-2
 
 services:
+  #? ----------------------------------------------------------------------------------------
+  #? Postgres de Kestra. Kestra necesita una base para guardar su estado; con Postgres (en vez
+  #? de la H2 en memoria) los flows y el historial sobreviven a un reinicio.
+  #? ----------------------------------------------------------------------------------------
   kestra-postgres:
     image: postgres:17-alpine
     environment:
@@ -10,10 +30,14 @@ services:
       POSTGRES_DB: ${KESTRA_POSTGRES_DB:?set KESTRA_POSTGRES_DB in .env}
       POSTGRES_USER: ${KESTRA_POSTGRES_USER:?set KESTRA_POSTGRES_USER in .env}
       POSTGRES_PASSWORD: ${KESTRA_POSTGRES_PASSWORD:?set KESTRA_POSTGRES_PASSWORD in .env}
+    #? host:5433 (por defecto) -> contenedor:5432. Solo para inspeccionar la base desde el host.
     ports:
       - "127.0.0.1:${KESTRA_POSTGRES_HOST_PORT}:5432"
+    #? Volumen con nombre = persistencia de los datos de Postgres entre reinicios.
     volumes:
       - kestra_postgres_data:/var/lib/postgresql/data
+    #? pg_isready confirma que Postgres acepta conexiones. Kestra espera a este healthcheck.
+    #? $$ = escape de compose para que la variable la expanda el shell del contenedor.
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
       interval: 5s
@@ -23,8 +47,13 @@ services:
     networks:
       - data-platform
 
+  #? ----------------------------------------------------------------------------------------
+  #? Kestra (orquestador). Modo standalone = servidor web + executor + scheduler + worker en
+  #? un solo contenedor (suficiente para un entorno local). Version fijada para reproducibilidad.
+  #? ----------------------------------------------------------------------------------------
   kestra:
     image: kestra/kestra:v1.3.40
+    #? root para poder escribir en los bind mounts y usar el socket de Docker.
     user: root
     command: ["server", "standalone", "--config", "/etc/kestra/application.yml"]
     environment:
@@ -35,25 +64,37 @@ services:
       #? Determinan el usuario y contrasena del usuario base de Kestra
       ENV_KESTRA_USERNAME: ${KESTRA_POSTGRES_USER:?set KESTRA_POSTGRES_USER in .env}
       ENV_KESTRA_PASSWORD: ${KESTRA_POSTGRES_PASSWORD:?set KESTRA_POSTGRES_PASSWORD in .env}
+      #? Usuario/contrasena para entrar a la UI de Kestra (basic auth).
       ENV_KESTRA_BASIC_AUTH_USERNAME: ${KESTRA_BASIC_AUTH_USERNAME:?set KESTRA_BASIC_AUTH_USERNAME in .env}
       ENV_KESTRA_BASIC_AUTH_PASSWORD: ${KESTRA_BASIC_AUTH_PASSWORD:?set KESTRA_BASIC_AUTH_PASSWORD in .env}
       # Kestra OSS resolves secret('NAME') from a base64-encoded SECRET_NAME.
+      #? Ej.: SECRET_SNOWFLAKE_USER (base64) se lee en el flow como secret('SNOWFLAKE_USER').
+      #? Asi las credenciales nunca aparecen en el YAML del flow ni en el repositorio.
       SECRET_SNOWFLAKE_ACCOUNT: ${SECRET_SNOWFLAKE_ACCOUNT:?set base64-encoded SECRET_SNOWFLAKE_ACCOUNT in .env}
       SECRET_SNOWFLAKE_USER: ${SECRET_SNOWFLAKE_USER:?set base64-encoded SECRET_SNOWFLAKE_USER in .env}
       SECRET_SNOWFLAKE_PASSWORD: ${SECRET_SNOWFLAKE_PASSWORD:?set base64-encoded SECRET_SNOWFLAKE_PASSWORD in .env}
       SECRET_SNOWFLAKE_ROLE: ${SECRET_SNOWFLAKE_ROLE:?set base64-encoded SECRET_SNOWFLAKE_ROLE in .env}
       SECRET_SNOWFLAKE_WAREHOUSE: ${SECRET_SNOWFLAKE_WAREHOUSE:?set base64-encoded SECRET_SNOWFLAKE_WAREHOUSE in .env}
+    #? 8080 = UI/API de Kestra; 8081 = endpoint de management (/health para el healthcheck).
     ports:
       - "127.0.0.1:${KESTRA_PORT}:8080"
       - "127.0.0.1:${KESTRA_MANAGEMENT_PORT}:8081"
     volumes:
+      #? Configuracion de Kestra (Postgres como repositorio/cola, storage local, auth).
       - ./src/res/config/kestra/application.yml:/etc/kestra/application.yml:ro
+      #? Carpeta de flows: de aqui el flow ejecuta prepare_bronze.py en cada corrida (por eso un
+      #? cambio al .py no requiere reimportar el flow; un cambio al .yml si).
       - ./src/main/kestra/flows:/workspace/kestra/flows
+      #? LANDING ZONE: aqui se copian los 3 ZIP de Tianchi. :ro = solo lectura -> la fuente
+      #? original no puede ser modificada por el pipeline.
       - ./src/res/data/raw:/usr/data/landing:ro
+      #? Storage interno de Kestra (outputs de tareas como partitions.json).
       - kestra_internal_storage:/app/storage
+      #? Directorio de trabajo temporal: aqui se escriben los CSV diarios antes del PUT.
       - ./src/res/logs/kestra:/tmp/kestra-wd
       #? Anademos el socket de docker para finalmente poder ejecutar contenedores de Docker internamente
       - /var/run/docker.sock:/var/run/docker.sock
+    #? No arranca hasta que Postgres este sano (healthcheck), no solo "iniciado".
     depends_on:
       kestra-postgres:
         condition: service_healthy
@@ -67,6 +108,11 @@ services:
     networks:
       - data-platform
 
+  #? ----------------------------------------------------------------------------------------
+  #? dbt (backend). Imagen propia basada en el proyecto dbt-ui (de la semana 05) con dbt Core
+  #? y el adaptador dbt-snowflake. Versiones fijadas en build args -> reproducible.
+  #? Aqui se ejecutan dbt run / dbt test / dbt build sobre el proyecto ssd_failure_prediction.
+  #? ----------------------------------------------------------------------------------------
   dbt-ui-backend:
     build:
       context: ./src/res/docker/custom-images
@@ -81,8 +127,11 @@ services:
       DBT_UI_PORT: "8001"
       DBT_UI_PROJECTS_PATH: /workspace/dbt-projects
       DBT_UI_DATA_DIR: /var/lib/dbt-ui
+      #? dbt busca profiles.yml en esta carpeta (montada desde src/res/config/dbt/profiles).
       DBT_PROFILES_DIR: /home/dbtui/.dbt
       DBT_LOG_PATH: /var/log/dbt
+      #? Credenciales que profiles.yml lee con env_var('DBT_SNOWFLAKE_...').
+      #? Nota: a diferencia de Kestra, aqui van en texto plano (no base64).
       DBT_SNOWFLAKE_ACCOUNT: ${SNOWFLAKE_ACCOUNT:? set SNOWFLAKE_ACCOUNT in .env}
       DBT_SNOWFLAKE_USER: ${SNOWFLAKE_USER:? set SNOWFLAKE_USER in .env}
       DBT_SNOWFLAKE_PASSWORD: ${SNOWFLAKE_PASSWORD:? set SNOWFLAKE_PASSWORD in .env}
@@ -90,8 +139,10 @@ services:
       DBT_SNOWFLAKE_WAREHOUSE: ${SNOWFLAKE_WAREHOUSE:? set SNOWFLAKE_WAREHOUSE in .env}
       DBT_SNOWFLAKE_DATABASE: ${SNOWFLAKE_DATABASE:? set SNOWFLAKE_DATABASE in .env}
       DBT_SNOWFLAKE_SCHEMA: ${SNOWFLAKE_SCHEMA:? set SNOWFLAKE_SCHEMA in .env}
+      #? Cuantos modelos construye dbt en paralelo.
       DBT_SNOWFLAKE_THREADS: ${DBT_SNOWFLAKE_THREADS:-4}
     volumes:
+      #? El proyecto dbt del repo se monta en vivo: editar un .sql y volver a correr dbt basta.
       - ./src/main/dbt:/workspace/dbt-projects
       - ./src/res/config/dbt/profiles:/home/dbtui/.dbt
       - dbt_ui_data:/var/lib/dbt-ui
@@ -106,6 +157,7 @@ services:
     networks:
       - data-platform
 
+  #? dbt (frontend web). Nginx sirve la UI y redirige /api/ al backend.
   dbt-ui:
     build:
       context: ./src/res/docker/custom-images
@@ -126,14 +178,21 @@ services:
     networks:
       - data-platform
 
+  #? ----------------------------------------------------------------------------------------
+  #? Spark + JupyterLab (EDA interactivo). Spark 4.0.4 en modo local[*] (todos los cores del
+  #? contenedor, sin cluster) + conector spark-snowflake para leer/escribir tablas Snowflake.
+  #? ----------------------------------------------------------------------------------------
   spark:
     build:
       context: ./src/res
       dockerfile: docker/custom-images/Dockerfile.pset2.spark
     environment:
+      #? Memoria del driver/executor; se puede subir en .env sin reconstruir la imagen.
       SPARK_DRIVER_MEMORY: ${SPARK_DRIVER_MEMORY:-2g}
       SPARK_EXECUTOR_MEMORY: ${SPARK_EXECUTOR_MEMORY:-2g}
+      #? Token para entrar a Jupyter (obligatorio, evita un Jupyter abierto sin clave).
       JUPYTER_TOKEN: ${JUPYTER_TOKEN:?set JUPYTER_TOKEN in .env}
+      #? Carpetas de Jupyter en /tmp para no ensuciar el bind mount de notebooks.
       JUPYTER_CONFIG_DIR: /tmp/jupyter/config
       JUPYTER_DATA_DIR: /tmp/jupyter/data
       JUPYTER_RUNTIME_DIR: /tmp/jupyter/runtime
@@ -147,19 +206,24 @@ services:
       SNOWFLAKE_SCHEMA: ${SNOWFLAKE_SCHEMA:? set SNOWFLAKE_SCHEMA in .env}
       SPARK_HOME: /opt/spark
       PYSPARK_PYTHON: /usr/bin/python3
+      #? Permite "import pyspark" y los helpers de /opt/spark/lib (snowflake_io.py) en notebooks.
       PYTHONPATH: /opt/spark/python:/opt/spark/python/lib/py4j-0.10.9.9-src.zip:/opt/spark/lib
+    #? 4040 = Spark UI (jobs, stages); 4041 en el host -> 8888 Jupyter.
     ports:
       - "127.0.0.1:${SPARK_UI_PORT:-4040}:4040"
       - "127.0.0.1:${JUPYTER_PORT:-4041}:8888"
     volumes:
+      #? Codigo versionado en solo lectura; notebooks en lectura/escritura.
       - ./src/main/python/spark/jobs:/opt/spark/jobs:ro
       - ./src/main/python/spark/lib:/opt/spark/lib:ro
       - ./src/main/python/spark/notebooks:/opt/spark/notebooks
       - ./src/res/config/spark/spark-defaults.conf:/opt/spark/conf/spark-defaults.conf:ro
       - ./src/res/config/spark/spark-env.sh:/opt/spark/conf/spark-env.sh:ro
       - ./src/res/config/spark/log4j2.properties:/opt/spark/conf/log4j2.properties:ro
+      #? Event logs de Spark (historial de ejecuciones).
       - ./src/res/logs/spark:/opt/spark/logs
     working_dir: /opt/spark/notebooks
+    #? El contenedor arranca JupyterLab (exec -> Jupyter es el PID 1 y recibe las senales).
     command:
       - bash
       - -lc
@@ -181,6 +245,15 @@ services:
     networks:
       - data-platform
 
+  #? ----------------------------------------------------------------------------------------
+  #? Snowpark Connect (job de la OBT). Contenedor "headless" (sin puertos): queda esperando y
+  #? el job se lanza a mano con:
+  #?   docker compose --env-file src/res/env/.env exec snowpark-connect \
+  #?     python /opt/spark/jobs/build_mc1_obt.py
+  #? Snowpark Connect traduce el codigo PySpark (API de DataFrames) a planes que ejecuta
+  #? Snowflake -> los datos no viajan a la maquina local (la tabla Gold tiene decenas de
+  #? millones de filas). Por eso usa SNOWFLAKE_WAREHOUSE_HIGH_COMPUTE (un warehouse mas grande).
+  #? ----------------------------------------------------------------------------------------
   snowpark-connect:
     build:
       context: ./src/res/docker/custom-images
@@ -198,6 +271,7 @@ services:
       SNOWFLAKE_WAREHOUSE: ${SNOWFLAKE_WAREHOUSE_HIGH_COMPUTE:? set SNOWFLAKE_WAREHOUSE_HIGH_COMPUTE in .env}
       SNOWFLAKE_DATABASE: ${SNOWFLAKE_DATABASE:? set SNOWFLAKE_DATABASE in .env}
       SNOWFLAKE_SCHEMA: ${SNOWFLAKE_SCHEMA:? set SNOWFLAKE_SCHEMA in .env}
+      #? Esquema de entrada (Gold, de dbt) y de salida (OBT) del job de Spark.
       SNOWFLAKE_GOLD_SCHEMA: ${SNOWFLAKE_GOLD_SCHEMA:-S_CDATOS_PSET2_GOLD}
       SNOWFLAKE_OBT_SCHEMA: ${SNOWFLAKE_OBT_SCHEMA:-S_CDATOS_PSET2_OBT}
       SNOWPARK_CONNECT_VERBOSE: ${SNOWPARK_CONNECT_VERBOSE:-false}
@@ -207,6 +281,7 @@ services:
       - ./src/main/python/spark/lib:/opt/spark/lib:ro
       - ./src/res/logs/spark:/opt/spark/logs
     working_dir: /opt/spark/work
+    #? Solo verifica que las librerias importen; NO prueba la conexion a Snowflake.
     healthcheck:
       test:
         - CMD
@@ -221,11 +296,14 @@ services:
     networks:
       - data-platform
 
+#? Volumenes administrados por Docker (persisten aunque se borren los contenedores;
+#? se eliminan con "docker compose down -v").
 volumes:
   kestra_postgres_data:
   kestra_internal_storage:
   dbt_ui_data:
 
+#? Red privada compartida: los servicios se encuentran por nombre (ej. kestra -> kestra-postgres).
 networks:
   data-platform:
     name: ciencia-de-datos-data-platform-pset-2

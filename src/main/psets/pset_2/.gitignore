@@ -1,0 +1,15 @@
+# Credenciales locales: nunca versionar
+/src/res/env/.env
+
+# Fuente original (ZIP de Tianchi, varios GB): se copia a mano en la landing zone
+/src/res/data/raw/*
+!/src/res/data/raw/.gitkeep
+
+# Artefactos de dbt
+/src/main/dbt/ssd_failure_prediction/target/
+/src/main/dbt/ssd_failure_prediction/dbt_packages/
+/src/main/dbt/ssd_failure_prediction/logs/
+
+# Python
+__pycache__/
+*.pyc

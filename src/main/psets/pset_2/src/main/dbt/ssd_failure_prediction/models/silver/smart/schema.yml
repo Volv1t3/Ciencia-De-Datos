@@ -1,3 +1,12 @@
+#? Tests de los modelos de limpieza (silver/smart/). Ademas de not_null/unique se usan tests
+#? genericos propios definidos en macros/secondary_silver_tests.sql:
+#?   at_least_one_retained_smart_attribute_is_present -> tabla limpia sin filas vacias
+#?   all_retained_smart_attributes_are_null           -> auditoria solo con filas vacias
+#?   smart_columns_absent                              -> columnas eliminadas no existen
+#?   smart_source_partition_reconciles                 -> limpio + auditoria = base, exacto
+#?   smart_year_union_reconciles                       -> final = 2018 + 2019, exacto
+#?   accepted_values                                   -> dominio de valores permitido
+#? Sintaxis 'arguments:' = formato nuevo de dbt (>= 1.10) para pasar parametros a un test.
 version: 2
 
 models:
@@ -89,6 +98,7 @@ models:
               arguments:
                 values: [ALL_SMART_ATTRIBUTES_NULL]
 
+  #? Modelos MC1: accepted_values [MC1] garantiza que el filtro de modelo funciono.
   - name: int_smart_2018_mc1
     description: >-
       Clean 2018 MC1 telemetry with globally unavailable and MC1-specific

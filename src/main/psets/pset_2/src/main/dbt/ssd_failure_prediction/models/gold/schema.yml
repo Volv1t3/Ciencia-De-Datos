@@ -1,3 +1,11 @@
+#? Tests del STAR SCHEMA (Gold). Reglas que validan:
+#?   unique / unique_column_combination -> el grain de cada tabla
+#?   relationships                      -> integridad referencial hecho -> dimension (FK valida)
+#?   gold_row_count_matches_source      -> los joins no perdieron ni duplicaron filas
+#?   continuous_date_spine              -> calendario sin huecos
+#?   smart_pair_missingness_matches     -> n_X y r_X nulos a la vez (regla SMART)
+#?   fact_ssd_model_is                  -> los hechos MC1 solo contienen SSD MC1
+#? Tests genericos propios en macros/gold_tests.sql.
 version: 2
 
 models:
@@ -121,6 +129,8 @@ models:
         description: Original Silver observation date retained without transformation.
         data_tests: [not_null]
 
+  #? severity: warn -> un SSD con dos fallas el mismo dia solo genera ADVERTENCIA, no error:
+  #? es posible en la fuente y no rompe el grain (una fila por evento, no por SSD-dia).
   - name: fct_failure_event_all
     description: Confirmed SSD failure events across every available model.
     data_tests:

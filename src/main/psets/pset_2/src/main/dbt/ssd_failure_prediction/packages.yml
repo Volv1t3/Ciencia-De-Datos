@@ -1,1 +1,2 @@
+#? Sin paquetes externos (ej. dbt_utils): los tests genericos propios estan en macros/*_tests.sql.
 packages: []

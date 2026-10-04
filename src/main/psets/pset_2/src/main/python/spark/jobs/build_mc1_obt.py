@@ -7,6 +7,30 @@ only for schema/audit DDL and zero-copy publication of already validated stage
 tables.
 """
 
+#? ==========================================================================================
+#? JOB SPARK: Gold (star schema) -> OBT (One Big Table) para el modelo de prediccion de fallas MC1.
+#? ------------------------------------------------------------------------------------------
+#? Como se ejecuta:
+#?   docker compose --env-file src/res/env/.env exec snowpark-connect \
+#?     python /opt/spark/jobs/build_mc1_obt.py [--start-date ... --end-date ... --ssd-limit N]
+#? Snowpark Connect: el codigo usa la API de DataFrames de PySpark, pero el plan se ejecuta DENTRO
+#? de Snowflake (no se descargan las decenas de millones de filas a la maquina local).
+#? 
+#? GRAIN de la OBT: una fila = un SSD MC1 en un dia de observacion (el mismo grain que
+#? FCT_SMART_DAILY_MC1). Cada fila tiene:
+#?   - identidad (6 cols): claves del hecho + DISK_ID/MODEL_CODE traidos de DIM_SSD
+#?   - features: para cada uno de los 22 atributos SMART MC1 y cada representacion (R raw / N
+#?     normalizada): valor del dia + medias/conteos en ventanas de 7/14/30 dias + cambio de media
+#?     respecto a la ventana anterior (tendencia) + banderas de validez -> 19 columnas por atributo
+#?   - etiqueta (5 cols): fecha de la primera falla, ultimo dia observado, dias hasta la falla,
+#?     estado de la etiqueta y TARGET_30D (1 = falla en los proximos 1..30 dias, 0 = no).
+#? Se publican 3 variantes: OBT_MC1_RN (847 cols), OBT_MC1_R y OBT_MC1_N (429 cols cada una).
+#? 
+#? Flujo (run_job, al final del archivo):
+#?   leer Gold -> validar grain y relaciones -> enriquecer con dimensiones (validando que el
+#?   conteo no cambie) -> etiquetas -> ventanas -> escribir tablas STAGE con sufijo de corrida ->
+#?   validar lo persistido -> publicar con CLONE -> fila de auditoria en OBT_MC1_RUN_AUDIT.
+#? ==========================================================================================
 from __future__ import annotations
 
 import argparse
@@ -37,8 +61,11 @@ from snowflake import snowpark_connect
 from snowflake.snowpark_connect.snowflake_session import SnowflakeSession
 
 
+#? Logger del job; los mensajes salen por consola con fecha y nivel (ver main).
 LOGGER = logging.getLogger("pset2.mc1_obt")
 
+#? Los 22 atributos SMART que MC1 si reporta (los mismos 44 n/r del modelo dbt fct_smart_daily_mc1).
+#? validate_smart_registry exige que Gold tenga EXACTAMENTE estas columnas.
 SMART_IDS: tuple[int, ...] = (
     1,
     5,
@@ -63,9 +90,12 @@ SMART_IDS: tuple[int, ...] = (
     206,
     211,
 )
+#? R = valor raw (contador real), N = valor normalizado por el fabricante.
 REPRESENTATIONS: tuple[str, ...] = ("R", "N")
+#? Tamanos de ventana movil (en dias) para las features temporales.
 WINDOW_DAYS: tuple[int, ...] = (7, 14, 30)
 
+#? Columnas de identidad de cada fila de la OBT.
 COMMON_COLUMNS: tuple[str, ...] = (
     "SMART_DAILY_KEY",
     "SSD_KEY",
@@ -74,6 +104,7 @@ COMMON_COLUMNS: tuple[str, ...] = (
     "OBSERVATION_DATE_KEY",
     "OBSERVATION_DATE",
 )
+#? Columnas de la etiqueta (ver _expected_label_status).
 TARGET_COLUMNS: tuple[str, ...] = (
     "FIRST_FAILURE_DATE",
     "LAST_SEEN_DATE",
@@ -82,12 +113,17 @@ TARGET_COLUMNS: tuple[str, ...] = (
     "TARGET_30D",
 )
 
+#? Anchos esperados = 6 identidad + 22 atributos x 19 columnas x (2 representaciones RN | 1) + 5 etiqueta.
+#? RN: 6 + 836 + 5 = 847 ; R o N: 6 + 418 + 5 = 429. Si cambia SMART_IDS hay que recalcularlos.
 EXPECTED_RN_WIDTH = 847
 EXPECTED_VARIANT_WIDTH = 429
+#? Columna auxiliar (dias desde 1970) para definir ventanas por rango de dias.
 INTERNAL_DAY_COLUMN = "_INTERNAL_OBSERVATION_DAY"
+#? Regex de nombre de columna SMART (R_5, N_187...). IDENTIFIER_PATTERN valida nombres de esquema.
 SMART_COLUMN_PATTERN = re.compile(r"^[RN]_[0-9]+$")
 IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_$]*$")
 
+#? Metricas que se guardan en la tabla de auditoria por cada corrida (conteos y chequeos).
 AUDIT_METRIC_NAMES: tuple[str, ...] = (
     "GOLD_OBSERVATION_COUNT",
     "GOLD_SSD_COUNT",
@@ -107,6 +143,7 @@ AUDIT_METRIC_NAMES: tuple[str, ...] = (
 )
 
 
+#? Dos tipos de error -> dos codigos de salida: validacion de datos (2) vs fallo de ejecucion (3).
 class ValidationError(RuntimeError):
     """A blocking contract violation in source data or generated output."""
 
@@ -115,6 +152,9 @@ class ExecutionError(RuntimeError):
     """A Snowflake, Snowpark Connect, write, or publication failure."""
 
 
+#? Definicion de ventana en dias relativos al dia actual (0 = hoy):
+#?   ventana actual   [current_start, current_end]   ej. 7D: [-6, 0] = hoy y los 6 dias previos
+#?   ventana anterior [previous_start, previous_end] ej. 7D: [-13, -7] = los 7 dias anteriores a esa
 @dataclass(frozen=True)
 class WindowDefinition:
     days: int
@@ -124,6 +164,7 @@ class WindowDefinition:
     previous_end: int
 
 
+#? La ventana anterior de 30D llega a -59 dias: por eso el contexto se extiende 59 dias atras.
 WINDOW_REGISTRY: tuple[WindowDefinition, ...] = (
     WindowDefinition(7, -6, 0, -13, -7),
     WindowDefinition(14, -13, 0, -27, -14),
@@ -131,6 +172,7 @@ WINDOW_REGISTRY: tuple[WindowDefinition, ...] = (
 )
 
 
+#? Credenciales/destino leidos del entorno (docker-compose -> .env).
 @dataclass(frozen=True)
 class JobConfig:
     account: str
@@ -143,12 +185,15 @@ class JobConfig:
     role: str | None = None
 
     @property
+    #? Valores que se borran (<redacted>) de cualquier mensaje de error antes de loguearlo.
     def sensitive_values(self) -> tuple[str, ...]:
         return tuple(
             value for value in (self.password, self.account, self.user) if value
         )
 
 
+#? Argumentos de linea de comandos. Con fechas o --ssd-limit la corrida es 'acotada' (desarrollo):
+#? escribe y valida stages pero NO publica las tablas finales.
 @dataclass(frozen=True)
 class JobArguments:
     start_date: date | None
@@ -167,6 +212,7 @@ class JobArguments:
         return not self.is_bounded and not self.validate_only
 
 
+#? Identidad de la corrida: id unico (hash) + sufijo para nombrar las tablas stage.
 @dataclass(frozen=True)
 class RunContext:
     run_id: str
@@ -175,6 +221,7 @@ class RunContext:
     app_name: str
 
 
+#? Nombres completos (BD.ESQUEMA.TABLA) de entradas Gold y salidas OBT.
 @dataclass(frozen=True)
 class RelationNames:
     dim_ssd: str
@@ -190,6 +237,7 @@ class RelationNames:
     audit: str
 
 
+#? Acumula las metricas de auditoria; set() rechaza nombres desconocidos.
 @dataclass
 class AuditMetrics:
     values: dict[str, int | None] = field(
@@ -212,6 +260,9 @@ def parse_iso_date(raw_value: str) -> date:
         ) from exc
 
 
+#? Opciones: --start-date/--end-date (rango de salida), --ssd-limit (muestra de N SSD),
+#? --validate-only (solo valida esquema/contratos, no escribe), --explain-plan (imprime el plan),
+#? --keep-staging (no borra las tablas stage al terminar).
 def parse_args(argv: Sequence[str] | None = None) -> JobArguments:
     parser = argparse.ArgumentParser(
         description="Build validated MC1 RN, R, and N OBT tables in Snowflake."
@@ -247,6 +298,8 @@ def _required_environment(name: str, fallback: str | None = None) -> str:
     return value.strip()
 
 
+#? Evita inyeccion SQL: los nombres de BD/esquema se interpolan en SQL, asi que solo se aceptan
+#? identificadores simples (letras, digitos, _ y $).
 def _validated_identifier(value: str, variable_name: str) -> str:
     candidate = value.strip()
     if not IDENTIFIER_PATTERN.fullmatch(candidate):
@@ -283,6 +336,7 @@ def load_config() -> JobConfig:
     )
 
 
+#? run_id = SHA-256(fecha + aleatorio). Los primeros 16 caracteres forman el sufijo de las stage.
 def generate_run_context() -> RunContext:
     started_at = datetime.now(timezone.utc)
     nonce = secrets.token_hex(16)
@@ -297,6 +351,9 @@ def generate_run_context() -> RunContext:
     )
 
 
+#? Entradas: DIM_SSD, DIM_DATE, FCT_SMART_DAILY_MC1, FCT_FAILURE_EVENT_MC1 (Gold, construidas por dbt).
+#? Salidas: tablas stage OBT_MC1_*__RUN_<sufijo> (una por corrida, no pisan nada) y las canonicas
+#? OBT_MC1_RN / _R / _N que se reemplazan solo si todo valida.
 def relation_names(config: JobConfig, run: RunContext) -> RelationNames:
     gold = f"{config.database}.{config.gold_schema}"
     obt = f"{config.database}.{config.obt_schema}"
@@ -315,6 +372,8 @@ def relation_names(config: JobConfig, run: RunContext) -> RelationNames:
     )
 
 
+#? Abre la sesion Spark remota de Snowpark Connect. UTC para fechas; ANSI = errores en vez de
+#? resultados silenciosos ante casts invalidos u overflow.
 def create_spark_session(
     config: JobConfig, run: RunContext
 ) -> tuple[SparkSession, SnowflakeSession]:
@@ -342,6 +401,7 @@ def create_spark_session(
     return spark, SnowflakeSession(spark)
 
 
+#? SQL directo solo para DDL/metadatos (crear esquema, CLONE, DROP); collect() fuerza la ejecucion.
 def execute_snowflake_sql(session: SnowflakeSession, statement: str) -> None:
     """Execute metadata SQL and force completion without collecting data rows."""
 
@@ -357,6 +417,8 @@ def ensure_output_schema(
     )
 
 
+#? Tabla de auditoria: una fila por corrida con estado (SUCCEEDED / FAILED_*), metricas y error.
+#? Sirve como evidencia de las validaciones de cada construccion de la OBT.
 def ensure_audit_table(session: SnowflakeSession, audit_fqn: str) -> None:
     execute_snowflake_sql(
         session,
@@ -388,11 +450,20 @@ def ensure_audit_table(session: SnowflakeSession, audit_fqn: str) -> None:
     )
 
 
+#? Nombres R_<id>/N_<id> (una o ambas representaciones).
 def smart_columns(representation: str | None = None) -> list[str]:
     representations = (representation,) if representation else REPRESENTATIONS
     return [f"{rep}_{smart_id}" for rep in representations for smart_id in SMART_IDS]
 
 
+#? Las 19 columnas que se generan por atributo y representacion, ej. para R_5:
+#?   R_5                       valor del dia
+#?   R_5_MEAN_{7,14,30}D       media movil de la ventana actual
+#?   R_5_COUNT_{..}D           cuantos dias con valor no nulo hubo en la ventana actual
+#?   R_5_PREV_COUNT_{..}D      idem en la ventana anterior
+#?   R_5_MEAN_VALID_{..}D      1 si la media actual existe (count > 0)
+#?   R_5_MEAN_SHIFT_{..}D      media actual - media anterior (tendencia / degradacion)
+#?   R_5_MEAN_SHIFT_VALID_{..}D 1 si ambas ventanas tienen datos
 def feature_family_columns(representation: str, smart_id: int) -> list[str]:
     base = f"{representation}_{smart_id}"
     columns = [base]
@@ -413,6 +484,7 @@ def representation_feature_columns(representation: str) -> list[str]:
     ]
 
 
+#? Orden exacto de columnas de cada variante (se compara con assert_exact_schema).
 def rn_final_columns() -> list[str]:
     return [
         *COMMON_COLUMNS,
@@ -442,6 +514,7 @@ def _case_insensitive_columns(df: DataFrame) -> dict[str, str]:
     return {name.upper(): name for name in df.columns}
 
 
+#? Selecciona las columnas requeridas sin importar mayusculas y falla si falta alguna.
 def normalize_required_columns(
     df: DataFrame, required: Iterable[str], relation_name: str
 ) -> DataFrame:
@@ -455,6 +528,7 @@ def normalize_required_columns(
     return df.select(*(F.col(lookup[name]).alias(name) for name in required_list))
 
 
+#? Contrato con Gold: el hecho debe tener exactamente las 44 columnas SMART esperadas, todas numericas.
 def validate_smart_registry(smart_fact: DataFrame, relation_name: str) -> None:
     lookup = _case_insensitive_columns(smart_fact)
     discovered = {name for name in lookup if SMART_COLUMN_PATTERN.fullmatch(name)}
@@ -486,6 +560,7 @@ def _date_literal(value: date) -> Column:
     return F.lit(value.isoformat()).cast("date")
 
 
+#? Filtra las filas de SALIDA al rango pedido (--start-date/--end-date).
 def apply_output_date_scope(df: DataFrame, args: JobArguments) -> DataFrame:
     scoped = df
     if args.start_date:
@@ -495,6 +570,9 @@ def apply_output_date_scope(df: DataFrame, args: JobArguments) -> DataFrame:
     return scoped
 
 
+#? Filas de CONTEXTO: se leen 59 dias antes (para llenar la ventana anterior de 30D) y 30 dias
+#? despues (para saber si el SSD siguio vivo 30 dias -> etiqueta NEGATIVE). Sin esto, las primeras
+#? y ultimas filas del rango tendrian features o etiquetas incorrectas.
 def apply_context_date_scope(df: DataFrame, args: JobArguments) -> DataFrame:
     scoped = df
     if args.start_date:
@@ -506,6 +584,8 @@ def apply_context_date_scope(df: DataFrame, args: JobArguments) -> DataFrame:
     return scoped
 
 
+#? Corrida de desarrollo: elige los primeros N SSD (orden por SSD_KEY -> muestra determinista) y
+#? limita contexto y salida a esos SSD.
 def apply_development_scope(
     smart_fact: DataFrame, args: JobArguments
 ) -> tuple[DataFrame, DataFrame, DataFrame | None]:
@@ -537,6 +617,7 @@ def collect_scalar_aggregate(df: DataFrame, expressions: Sequence[Column]) -> di
     return _normalized_scalar_mapping(row)
 
 
+#? Filas, claves distintas y pares (SSD, fecha) distintos -> base para validar el grain.
 def grain_metrics(df: DataFrame) -> dict[str, int]:
     metrics = collect_scalar_aggregate(
         df,
@@ -552,6 +633,8 @@ def grain_metrics(df: DataFrame) -> dict[str, int]:
     return {name: int(value or 0) for name, value in metrics.items()}
 
 
+#? VALIDACION DE GRAIN de la entrada: si filas != claves distintas o != pares (SSD, fecha)
+#? distintos, hay duplicados en Gold y el job se detiene antes de construir nada.
 def validate_source_grain(df: DataFrame, scope_name: str) -> dict[str, int]:
     metrics = grain_metrics(df)
     if metrics["ROW_COUNT"] == 0:
@@ -567,6 +650,7 @@ def validate_source_grain(df: DataFrame, scope_name: str) -> dict[str, int]:
     return metrics
 
 
+#? Cuantos grupos de la clave dada aparecen mas de una vez.
 def _duplicate_key_count(df: DataFrame, key_columns: Sequence[str]) -> int:
     duplicate_groups = (
         df.groupBy(*key_columns)
@@ -580,6 +664,8 @@ def _duplicate_key_count(df: DataFrame, key_columns: Sequence[str]) -> int:
     return int(value or 0)
 
 
+#? Integridad referencial ANTES de unir: dimensiones sin claves duplicadas (si no, el join
+#? multiplicaria filas) y ningun hecho sin su SSD o su fecha (left_anti = filas sin pareja).
 def validate_dimension_relationships(
     context_fact: DataFrame,
     dim_ssd: DataFrame,
@@ -632,6 +718,9 @@ def validate_dimension_relationships(
         )
 
 
+#? Une el hecho con DIM_SSD (trae DISK_ID y MODEL_CODE) y DIM_DATE (verifica fecha y clave).
+#? VALIDACION CLAVE DEL PSET: el numero de filas despues del join debe ser IGUAL al de antes;
+#? asi se demuestra que los joins no duplicaron ni perdieron observaciones.
 def build_base_observations(
     scoped_fact: DataFrame,
     dim_ssd: DataFrame,
@@ -688,6 +777,7 @@ def build_base_observations(
     return enriched
 
 
+#? Mismas comprobaciones de integridad para el hecho de fallas.
 def validate_failure_relationships(
     failures: DataFrame, dim_ssd: DataFrame, dim_date: DataFrame
 ) -> None:
@@ -735,6 +825,7 @@ def validate_failure_relationships(
         )
 
 
+#? Por SSD: fecha de la PRIMERA falla (es la que define la etiqueta) y cuantas fallas tiene.
 def build_failure_summary(failures: DataFrame) -> DataFrame:
     return failures.groupBy("SSD_KEY").agg(
         F.min("FAILURE_DATE").alias("FIRST_FAILURE_DATE"),
@@ -742,12 +833,20 @@ def build_failure_summary(failures: DataFrame) -> DataFrame:
     )
 
 
+#? Ultimo dia en que el SSD reporto telemetria (se usa para decidir NEGATIVE vs CENSORED).
 def build_last_seen(context_observations: DataFrame) -> DataFrame:
     return context_observations.groupBy("SSD_KEY").agg(
         F.max("OBSERVATION_DATE").alias("LAST_SEEN_DATE")
     )
 
 
+#? DEFINICION DE LA ETIQUETA (horizonte de 30 dias), en orden de prioridad:
+#?   POST_FAILURE     observacion posterior a la falla           -> no se usa (TARGET NULL)
+#?   SAME_DAY_FAILURE observacion el mismo dia de la falla        -> no se usa (no da anticipacion)
+#?   POSITIVE         la falla ocurre entre 1 y 30 dias despues   -> TARGET_30D = 1
+#?   NEGATIVE         el SSD sigue observado >= 30 dias despues   -> TARGET_30D = 0
+#?   CENSORED         no hay suficiente futuro para saberlo       -> no se usa (TARGET NULL)
+#? CENSORED evita etiquetar como 'sano' un disco del que simplemente dejamos de tener datos.
 def _expected_label_status() -> Column:
     days = F.datediff(F.col("FIRST_FAILURE_DATE"), F.col("OBSERVATION_DATE"))
     return (
@@ -770,6 +869,7 @@ def _expected_label_status() -> Column:
     )
 
 
+#? Convierte el estado en 1 / 0 / NULL.
 def _expected_target() -> Column:
     status = _expected_label_status()
     return (
@@ -779,6 +879,7 @@ def _expected_target() -> Column:
     )
 
 
+#? Calcula las 5 columnas de etiqueta para cada fila de salida (joins left: un SSD puede no fallar).
 def build_labels(
     output_observations: DataFrame,
     failure_summary: DataFrame,
@@ -800,6 +901,8 @@ def build_labels(
     return labels.select("SMART_DAILY_KEY", *TARGET_COLUMNS)
 
 
+#? Ventanas por SSD ordenadas por numero de dia. rangeBetween usa DIAS (no filas): si faltan dias
+#? de telemetria, la ventana sigue cubriendo el periodo calendario correcto.
 def build_window_registry() -> dict[int, tuple[Window, Window]]:
     ordered = Window.partitionBy("SSD_KEY").orderBy(INTERNAL_DAY_COLUMN)
     return {
@@ -811,6 +914,8 @@ def build_window_registry() -> dict[int, tuple[Window, Window]]:
     }
 
 
+#? Para cada atributo x representacion x ventana: media y conteo (no nulos) en la ventana actual
+#? y en la anterior. avg/count ignoran NULL: no se imputan valores.
 def build_window_statistics(context_observations: DataFrame) -> DataFrame:
     window_registry = build_window_registry()
     base = context_observations.withColumn(
@@ -845,6 +950,8 @@ def build_window_statistics(context_observations: DataFrame) -> DataFrame:
     return base.select(*expressions)
 
 
+#? Banderas de validez y MEAN_SHIFT = media actual - media anterior (solo si ambas tienen datos).
+#? Un SHIFT positivo en contadores de errores (ej. R_5 sectores reasignados) indica degradacion.
 def build_derived_temporal_features(window_df: DataFrame) -> DataFrame:
     expressions: list[Column] = [F.col(column) for column in COMMON_COLUMNS]
     for representation in REPRESENTATIONS:
@@ -896,6 +1003,7 @@ def build_derived_temporal_features(window_df: DataFrame) -> DataFrame:
     return window_df.select(*expressions)
 
 
+#? Falla si las columnas o su ORDEN no coinciden con lo esperado.
 def assert_exact_schema(
     df: DataFrame, expected_columns: Sequence[str], relation_name: str
 ) -> None:
@@ -910,6 +1018,8 @@ def assert_exact_schema(
         )
 
 
+#? Construye la variante RN: features sobre el contexto, recorte al rango de salida y join INNER
+#? por SMART_DAILY_KEY con las etiquetas (1 a 1, mismo grain).
 def build_rn_obt(
     context_observations: DataFrame,
     labels: DataFrame,
@@ -929,6 +1039,7 @@ def build_rn_obt(
     return rn_df
 
 
+#? Combina una lista de condiciones con OR (_all_of: con AND).
 def _any_of(expressions: Sequence[Column]) -> Column:
     if not expressions:
         return F.lit(False)
@@ -941,6 +1052,7 @@ def _all_of(expressions: Sequence[Column]) -> Column:
     return reduce(lambda left, right: left & right, expressions)
 
 
+#? Cuenta filas que cumplen una condicion.
 def _count_where(df: DataFrame, predicate: Column, alias: str) -> int:
     value = collect_scalar_aggregate(
         df,
@@ -951,6 +1063,7 @@ def _count_where(df: DataFrame, predicate: Column, alias: str) -> int:
     return int(value or 0)
 
 
+#? Invalido si un conteo de ventana es NULL, negativo o mayor que los dias de la ventana.
 def _rolling_count_invalid_predicate() -> Column:
     invalid: list[Column] = []
     for representation in REPRESENTATIONS:
@@ -970,6 +1083,7 @@ def _rolling_count_invalid_predicate() -> Column:
     return _any_of(invalid)
 
 
+#? Media debe existir si y solo si el conteo > 0; la bandera VALID debe coincidir.
 def _mean_invalid_predicate() -> Column:
     invalid: list[Column] = []
     for representation in REPRESENTATIONS:
@@ -991,6 +1105,7 @@ def _mean_invalid_predicate() -> Column:
     return _any_of(invalid)
 
 
+#? SHIFT debe existir si y solo si ambas ventanas tienen datos; la bandera debe coincidir.
 def _shift_invalid_predicate() -> Column:
     invalid: list[Column] = []
     for representation in REPRESENTATIONS:
@@ -1016,6 +1131,8 @@ def _shift_invalid_predicate() -> Column:
     return _any_of(invalid)
 
 
+#? Compara conteos de R y N del mismo atributo (deberian coincidir porque n_X y r_X vienen juntos).
+#? Solo genera advertencia, no bloquea.
 def _rn_count_mismatch_predicate() -> Column:
     mismatches: list[Column] = []
     for smart_id in SMART_IDS:
@@ -1031,6 +1148,7 @@ def _rn_count_mismatch_predicate() -> Column:
     return _any_of(mismatches)
 
 
+#? Recalcula la etiqueta y compara con lo persistido (eqNullSafe compara NULL = NULL).
 def _label_invalid_predicate() -> Column:
     expected_days = F.datediff(
         F.col("FIRST_FAILURE_DATE"), F.col("OBSERVATION_DATE")
@@ -1042,6 +1160,11 @@ def _label_invalid_predicate() -> Column:
     )
 
 
+#? VALIDACION DE LA TABLA YA ESCRITA en Snowflake (no del plan en memoria). Calcula todo en UNA
+#? agregacion (una sola pasada) y bloquea la publicacion si: cambia el numero de filas respecto
+#? a Gold, hay claves o pares (SSD, fecha) duplicados, conteos/medias/shifts inconsistentes,
+#? etiquetas mal calculadas, modelo distinto de MC1, DISK_ID o LAST_SEEN nulos, o filas sin
+#? ningun valor R o N.
 def validate_rn_stage(
     rn_stage: DataFrame,
     expected_row_count: int,
@@ -1191,11 +1314,13 @@ def validate_rn_stage(
         )
 
 
+#? Escribe un DataFrame como tabla Snowflake (overwrite de la stage de esta corrida).
 def write_stage(df: DataFrame, stage_fqn: str) -> None:
     LOGGER.info("Writing run-scoped stage %s", stage_fqn)
     df.write.mode("overwrite").saveAsTable(stage_fqn)
 
 
+#? Las variantes R y N: ancho 429, sin columnas de la otra representacion y mismas filas que RN.
 def validate_variant_stage(
     variant: DataFrame,
     representation: str,
@@ -1222,6 +1347,8 @@ def validate_variant_stage(
         raise ValidationError(f"{representation} stage row count does not match RN.")
 
 
+#? R y N deben tener exactamente las mismas filas de identidad y etiqueta que RN
+#? (exceptAll en ambos sentidos = diferencia de multiconjuntos).
 def validate_variant_parity(
     rn_stage: DataFrame, r_stage: DataFrame, n_stage: DataFrame
 ) -> None:
@@ -1237,6 +1364,7 @@ def validate_variant_parity(
             )
 
 
+#? Loguea cuantas filas hay por ano y estado de etiqueta (balance de clases).
 def log_year_label_diagnostics(rn_stage: DataFrame) -> None:
     diagnostics = (
         rn_stage.groupBy(
@@ -1255,6 +1383,9 @@ def log_year_label_diagnostics(rn_stage: DataFrame) -> None:
         )
 
 
+#? PUBLICACION: CREATE OR REPLACE ... CLONE = copia 'zero-copy' (instantanea, sin duplicar
+#? almacenamiento) de la stage validada a la tabla final. Los consumidores nunca ven una tabla
+#? a medio escribir. COPY GRANTS conserva los permisos de la tabla anterior.
 def promote_stage(
     session: SnowflakeSession,
     stage_fqn: str,
@@ -1266,11 +1397,13 @@ def promote_stage(
     )
 
 
+#? Borra las tablas stage de la corrida (solo en corridas de produccion exitosas).
 def cleanup_staging(session: SnowflakeSession, relations: RelationNames) -> None:
     for stage_fqn in (relations.rn_stage, relations.r_stage, relations.n_stage):
         execute_snowflake_sql(session, f"DROP TABLE IF EXISTS {stage_fqn}")
 
 
+#? Quita credenciales del mensaje de error antes de loguearlo o guardarlo en auditoria.
 def sanitize_error(error: BaseException, config: JobConfig | None) -> str:
     message = f"{type(error).__name__}: {error}"
     if config:
@@ -1297,6 +1430,7 @@ def _audit_schema() -> StructType:
     return StructType(fields)
 
 
+#? Agrega (append) la fila de auditoria de esta corrida.
 def write_audit_row(
     spark: SparkSession,
     audit_fqn: str,
@@ -1328,6 +1462,7 @@ def stop_spark_session(spark: SparkSession | None) -> None:
         LOGGER.warning("Unable to stop the Snowpark Connect session cleanly.")
 
 
+#? Lee las 4 tablas Gold y valida que tengan las columnas requeridas.
 def _load_sources(
     spark: SparkSession, relations: RelationNames
 ) -> tuple[DataFrame, DataFrame, DataFrame, DataFrame]:
@@ -1369,6 +1504,7 @@ def _load_sources(
     return smart_fact, dim_ssd, dim_date, failures
 
 
+#? ORQUESTACION DEL JOB. Codigos de salida: 0 ok, 2 fallo de validacion, 3 fallo de ejecucion.
 def run_job(args: JobArguments) -> int:
     config: JobConfig | None = None
     run = generate_run_context()
@@ -1380,6 +1516,7 @@ def run_job(args: JobArguments) -> int:
     published: list[str] = []
 
     try:
+        #? 1) Configuracion, sesion y tablas de soporte (esquema OBT, auditoria).
         config = load_config()
         relations = relation_names(config, run)
         spark, snowflake_session = create_spark_session(config, run)
@@ -1401,6 +1538,7 @@ def run_job(args: JobArguments) -> int:
             relations.n_stage,
         )
 
+        #? 2) Leer Gold, aplicar alcance (fechas / muestra) y validar el grain de entrada.
         smart_fact, dim_ssd, dim_date, failures = _load_sources(spark, relations)
         context_fact, output_fact, selected_ssds = apply_development_scope(
             smart_fact, args
@@ -1416,6 +1554,7 @@ def run_job(args: JobArguments) -> int:
             GOLD_SSD_COUNT=output_grain["DISTINCT_SSD_COUNT"],
         )
 
+        #? 3) Integridad referencial y enriquecimiento con dimensiones (conteo debe mantenerse).
         validate_dimension_relationships(context_fact, dim_ssd, dim_date)
         context_base = build_base_observations(
             context_fact, dim_ssd, dim_date, context_grain["ROW_COUNT"]
@@ -1426,6 +1565,7 @@ def run_job(args: JobArguments) -> int:
                 "Dimension-enriched output count does not match the scoped Gold fact."
             )
 
+        #? 4) Resumen de fallas por SSD. Si un SSD tiene varias fallas, manda la primera (se avisa en el log).
         scoped_failures = failures
         if selected_ssds is not None:
             scoped_failures = failures.join(selected_ssds, on="SSD_KEY", how="inner")
@@ -1443,6 +1583,7 @@ def run_job(args: JobArguments) -> int:
                 multiple_failure_ssds,
             )
 
+        #? 5) Etiquetas y features temporales -> DataFrame RN (aun no ejecutado: Spark es lazy).
         labels = build_labels(
             output_base,
             failure_summary,
@@ -1452,6 +1593,7 @@ def run_job(args: JobArguments) -> int:
         if args.explain_plan:
             rn_df.explain(extended=True)
 
+        #? Modo --validate-only: termina aqui sin escribir nada.
         if args.validate_only:
             LOGGER.info(
                 "Validate-only completed: source contracts and generated %s-column RN schema are valid; no stages or audit row were written.",
@@ -1460,6 +1602,8 @@ def run_job(args: JobArguments) -> int:
             stop_spark_session(spark)
             return 0
 
+        #? 6) Escribir RN en la stage y validar LO PERSISTIDO; luego proyectar R y N desde la stage
+        #? (asi las 3 variantes salen exactamente de los mismos datos) y validarlas.
         write_stage(rn_df, relations.rn_stage)
         rn_stage = spark.table(relations.rn_stage)
         validate_rn_stage(rn_stage, output_grain["ROW_COUNT"], metrics)
@@ -1477,6 +1621,8 @@ def run_job(args: JobArguments) -> int:
         validate_variant_parity(rn_stage, r_stage, n_stage)
         log_year_label_diagnostics(rn_stage)
 
+        #? 7) Publicar: solo en corrida completa (sin fechas ni muestra). Una corrida acotada deja las
+        #? stages para inspeccion y no toca las tablas finales.
         success_note: str | None = None
         if args.is_bounded:
             success_note = (
@@ -1494,6 +1640,7 @@ def run_job(args: JobArguments) -> int:
                 published.append(canonical_fqn)
                 LOGGER.info("Published %s from %s", canonical_fqn, stage_fqn)
 
+        #? 8) Auditoria de exito y limpieza de stages.
         write_audit_row(
             spark,
             relations.audit,
@@ -1517,6 +1664,8 @@ def run_job(args: JobArguments) -> int:
         stop_spark_session(spark)
         return 0
 
+    #? Cualquier error: se registra la fila de auditoria con el estado de fallo y se conservan las
+    #? stages para depurar. Las tablas canonicas anteriores quedan intactas (solo se reemplazan al final).
     except ValidationError as error:
         status = "FAILED_VALIDATION"
         safe_error = sanitize_error(error, config)
@@ -1555,6 +1704,7 @@ def run_job(args: JobArguments) -> int:
     return 2 if status == "FAILED_VALIDATION" else 3
 
 
+#? Punto de entrada: configura logging, lee argumentos y ejecuta. sys.exit propaga el codigo.
 def main(argv: Sequence[str] | None = None) -> int:
     logging.basicConfig(
         level=logging.INFO,

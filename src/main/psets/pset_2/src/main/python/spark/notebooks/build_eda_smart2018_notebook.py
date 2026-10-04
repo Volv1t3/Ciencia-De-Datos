@@ -1,5 +1,11 @@
 """Generate the menu-driven SMART 2018 Snowflake-backed EDA notebook."""
 
+#? Generador de notebook de EDA (Analisis Exploratorio). Este script NO analiza datos: escribe un
+#? archivo .ipynb en notebooks/datagrip/ con celdas de markdown y codigo. El notebook generado se
+#? abre en JupyterLab (contenedor spark) y consulta Silver en Snowflake para medir completitud
+#? (nulos por columna y patrones de nulos), validez (rangos, distribuciones), duplicados y riesgo
+#? de falla. Sus resultados (CSV en exports/) son la evidencia de la politica de limpieza de dbt.
+#? Ojo: el contenido de las celdas esta dentro de cadenas de texto; cambiarlo cambia el notebook.
 from __future__ import annotations
 
 import argparse
@@ -7,6 +13,7 @@ import json
 from pathlib import Path
 
 
+#? --year 2018|2019: el mismo generador produce el notebook de ambos anos.
 parser = argparse.ArgumentParser(description="Generate a SMART-year EDA notebook")
 parser.add_argument("--year", type=int, choices=(2018, 2019), default=2018)
 arguments = parser.parse_args()
@@ -17,6 +24,7 @@ TARGET = (
     / f"EDA_SMART{YEAR}_CloudComputingEnabled.ipynb"
 )
 
+#? Los 51 atributos SMART de la fuente (cada uno con columnas R_ y N_).
 ATTRIBUTE_IDS = [
     *range(1, 14),
     170, 171, 172, 173, 174, 177, 180, 181, 182, 183, 184,
@@ -27,10 +35,12 @@ ATTRIBUTE_IDS = [
 SMART_COLUMNS = [f"{prefix}_{attribute_id}" for attribute_id in ATTRIBUTE_IDS for prefix in ("R", "N")]
 
 
+#? Crea una celda markdown en formato nbformat.
 def markdown(source: str) -> dict:
     return {"cell_type": "markdown", "metadata": {}, "source": source}
 
 
+#? Crea una celda de codigo vacia de resultados (outputs = []).
 def code(source: str) -> dict:
     return {
         "cell_type": "code",
@@ -41,6 +51,7 @@ def code(source: str) -> dict:
     }
 
 
+#? Lista de celdas del notebook, en orden. Todo lo que sigue entre comillas es contenido de celdas.
 cells = [
     markdown(
         """# SMART 2018 exploratory data analysis
@@ -1471,6 +1482,7 @@ warehouse's auto-suspend configuration.
     ]
 )
 
+#? Estructura final del .ipynb: celdas + kernel "pyspark-snowflake" (ver src/res/config/spark/kernels).
 notebook = {
     "cells": cells,
     "metadata": {
@@ -1485,10 +1497,12 @@ notebook = {
     "nbformat_minor": 5,
 }
 
+#? Para 2019 reemplaza el ano en todas las celdas (tablas SMART_2019, etc.).
 if YEAR != 2018:
     for cell in notebook["cells"]:
         cell["source"] = cell["source"].replace("2018", str(YEAR))
 
+#? Escribe el notebook en disco (se sobreescribe en cada ejecucion del generador).
 TARGET.parent.mkdir(parents=True, exist_ok=True)
 TARGET.write_text(json.dumps(notebook, indent=1) + "\n", encoding="utf-8")
 print(f"Wrote {TARGET} with {len(cells)} cells")

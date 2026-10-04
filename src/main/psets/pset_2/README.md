@@ -10,6 +10,10 @@ Snowflake remains external to Compose.
 For the file-by-file technical design, mounts, persistence model, and Snowflake
 bootstrap procedure, see [IMPLEMENTATION.md](IMPLEMENTATION.md).
 
+> **Documentación en español:** [`docs/`](docs/README.md) explica la arquitectura, la ingesta,
+> la calidad de datos, el modelado, la OBT, batch vs. streaming, las limitaciones, la ejecución
+> paso a paso y un mapa del código, siguiendo la estructura del documento técnico del PSet.
+
 ## Documentation map
 
 Start here, then follow the layer links in pipeline order:

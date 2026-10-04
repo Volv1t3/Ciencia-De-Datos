@@ -1,5 +1,8 @@
+#? Configuracion del servidor Kestra (montada en /etc/kestra/application.yml).
+#? Los ${ENV_...} los inyecta docker-compose desde el .env; ${X:valor} = valor por defecto.
 datasources:
   postgres:
+    #? Conexion JDBC al contenedor kestra-postgres (por nombre de servicio en la red docker).
     url: jdbc:postgresql://${ENV_KESTRA_DATABASE_HOST}:${ENV_KESTRA_DATABASE_PORT}/${ENV_KESTRA_DATABASE}
     driver-class-name: org.postgresql.Driver
     username: ${ENV_KESTRA_USERNAME:kestra}
@@ -7,17 +10,22 @@ datasources:
 
 kestra:
   server:
+    #? Login de la UI/API. Sin esto cualquiera con acceso al puerto podria lanzar flows.
     basic-auth:
       username: ${ENV_KESTRA_BASIC_AUTH_USERNAME}
       password: ${ENV_KESTRA_BASIC_AUTH_PASSWORD}
+  #? repository = donde guarda flows/ejecuciones; queue = cola interna de mensajes entre
+  #? scheduler, executor y worker. Ambos en Postgres -> persistentes tras reiniciar.
   repository:
     type: postgres
   queue:
     type: postgres
+  #? Internal storage: archivos de entrada/salida de las tareas (ej. partitions.json).
   storage:
     type: local
     local:
       base-path: /app/storage
+  #? Directorio temporal de trabajo de las tareas (bind mount en src/res/logs/kestra).
   tasks:
     tmp-dir:
       path: /tmp/kestra-wd/tmp

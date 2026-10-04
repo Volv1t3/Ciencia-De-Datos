@@ -1,14 +1,21 @@
+#? Perfil de conexion de dbt. El nombre (ssd_failure_prediction) debe coincidir con
+#? "profile:" en dbt_project.yml.
 ssd_failure_prediction:
+  #? target por defecto; se podria agregar otro (ej. prod) y usar "dbt run --target prod".
   target: dev
   outputs:
     dev:
       type: snowflake
+      #? Nada esta escrito aqui: env_var() lee las variables que pone docker-compose
+      #? (DBT_SNOWFLAKE_*) a partir del .env. Por eso el archivo puede estar en el repo.
       account: "{{ env_var('DBT_SNOWFLAKE_ACCOUNT') }}"
       user: "{{ env_var('DBT_SNOWFLAKE_USER') }}"
       password: "{{ env_var('DBT_SNOWFLAKE_PASSWORD') }}"
       role: "{{ env_var('DBT_SNOWFLAKE_ROLE') }}"
       warehouse: "{{ env_var('DBT_SNOWFLAKE_WAREHOUSE') }}"
       database: "{{ env_var('DBT_SNOWFLAKE_DATABASE') }}"
+      #? Esquema base; los modelos lo cambian con +schema (ver macros/generate_schema_name.sql).
       schema: "{{ env_var('DBT_SNOWFLAKE_SCHEMA') }}"
+      #? Modelos construidos en paralelo (default 4). as_number convierte el texto a numero.
       threads: "{{ env_var('DBT_SNOWFLAKE_THREADS', '4') | as_number }}"
       client_session_keep_alive: false

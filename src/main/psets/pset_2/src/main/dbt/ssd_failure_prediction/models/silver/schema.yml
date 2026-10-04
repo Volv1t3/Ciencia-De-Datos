@@ -1,3 +1,7 @@
+#? Documentacion y TESTS de los 3 modelos Silver base. dbt test los ejecuta todos.
+#?   not_null -> completitud de columnas obligatorias (si TRY_TO_* fallo, aparece aqui).
+#?   unique   -> silver_record_id identifica una sola fila (sin duplicados por recarga).
+#? Tests adicionales de validez de fechas: carpeta tests/ (tests singulares).
 version: 2
 
 models:

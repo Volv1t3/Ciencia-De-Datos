@@ -1,14 +1,43 @@
+#? ==========================================================================================
+#? FLOW DE INGESTA BRONZE (Fuente -> Kestra -> Bronze)
+#? ------------------------------------------------------------------------------------------
+#? Que hace, en orden:
+#?   1. Crea (si no existen) el FILE FORMAT, el STAGE y las 3 tablas RAW en Snowflake.
+#?   2. plan_partitions: un script Python mira el ZIP de la fuente y arma "paquetes" de dias
+#?      (2 meses por paquete) -> partitions.json.
+#?   3. partition_workers: hasta 6 paquetes en paralelo; dentro de cada paquete se procesa
+#?      dia por dia: extraer CSV del ZIP -> PUT al stage -> borrar el CSV temporal.
+#?   4. merge_csv: un unico MERGE desde el stage hacia la tabla RAW (idempotente).
+#?   5. verify_load + fail_if_incomplete: reconciliacion. Si alguna fila del stage no quedo
+#?      en Bronze, la ejecucion termina en FAILED.
+#?
+#? Por que es "Bronze": se guarda el dato ORIGINAL (todo como texto dentro de un VARIANT) +
+#? metadatos de linaje (archivo, fila, fecha, hash). No se limpia ni se tipa nada aqui;
+#? eso lo hace dbt en Silver.
+#? ==========================================================================================
+
+#? id + namespace identifican el flow en Kestra (UI: Flows > ssd_failure_prediction > bronze_ingestion).
 id: bronze_ingestion
 namespace: ssd_failure_prediction
 description: Stage validated Tianchi CSV rows and merge source-faithful VARIANT records into Bronze.
+#? Solo UNA ejecucion del flow a la vez. Evita que dos cargas hagan MERGE sobre la misma tabla
+#? al mismo tiempo (condiciones de carrera / bloqueos en Snowflake). Las demas quedan en cola.
 concurrency:
   limit: 1
+#? ------------------------------------------------------------------------------------------
+#? INPUTS: parametros que se eligen al pulsar "Execute" en la UI (o desde un trigger/API).
+#? ------------------------------------------------------------------------------------------
 inputs:
+  #? Que dataset cargar. Uno por ejecucion para que una carga historica no sea gigantesca.
+  #? Por defecto failure_labels porque es el mas pequeno (sirve como prueba rapida).
   - id: dataset
     type: SELECT
     values: [smart_2018, smart_2019, failure_labels]
     defaults: failure_labels
     description: One source dataset per execution so historical loads stay bounded.
+  #? requested_start_date / requested_end_date = mecanismo de BACKFILL.
+  #? Son opcionales: vacios = todos los dias del ZIP. Con valores (inclusive, YYYY-MM-DD)
+  #? se recarga solo ese rango. Solo aplican a SMART (las etiquetas no tienen fecha por archivo).
   - id: requested_start_date
     type: STRING
     required: false
@@ -19,6 +48,26 @@ inputs:
     description: Inclusive YYYY-MM-DD filter for dated SMART CSV files.
 
 tasks:
+  #? ========================================================================================
+  #? BLOQUE 1: DDL idempotente (CREATE ... IF NOT EXISTS). Se puede correr mil veces sin romper.
+  #? ----------------------------------------------------------------------------------------
+  #? Patron repetido en TODAS las tareas Snowflake de este flow:
+  #?   - type ...snowflake.Query  -> plugin JDBC de Kestra que ejecuta SQL en Snowflake.
+  #?   - retry exponential        -> MANEJO DE ERRORES: si falla (red, timeout, warehouse
+  #?                                 suspendido) reintenta esperando 10s, 20s, 40s... (tope 1 min
+  #?                                 entre intentos), maximo 4 intentos o 10 min en total.
+  #?   - warningOnRetry: true     -> si tuvo que reintentar, la ejecucion queda en WARNING
+  #?                                 (no SUCCESS) para que se note que hubo un problema.
+  #?   - secret('...')            -> credenciales leidas de variables SECRET_* (base64) del .env;
+  #?                                 nunca estan escritas en el repo.
+  #?   - queryTag                 -> etiqueta cada query con el id de ejecucion; en Snowflake
+  #?                                 (QUERY_HISTORY) se puede rastrear que queries hizo cada corrida.
+  #?   - connectionPooling: false -> conexion nueva por tarea (mas simple, sin conexiones colgadas).
+  #? ========================================================================================
+
+  #? FILE FORMAT = como Snowflake debe leer los CSV que subimos al stage:
+  #? separado por comas, salta la cabecera, comillas opcionales, campo vacio -> NULL,
+  #? UTF8 y COMPRESSION AUTO (detecta el .gz que genera el PUT).
   - id: create_csv_file_format
     type: io.kestra.plugin.jdbc.snowflake.Query
     retry:
@@ -43,6 +92,8 @@ tasks:
         FIELD_OPTIONALLY_ENCLOSED_BY = '"' EMPTY_FIELD_AS_NULL = TRUE
         ENCODING = 'UTF8' COMPRESSION = AUTO
 
+  #? STAGE interno = "carpeta" dentro de Snowflake donde se suben archivos con PUT antes de
+  #? leerlos con SQL. Se le asocia el file format anterior.
   - id: create_smart_archive_stage
     type: io.kestra.plugin.jdbc.snowflake.Query
     retry:
@@ -65,6 +116,8 @@ tasks:
       CREATE STAGE IF NOT EXISTS S_CDATOS_PSET2.S_CDATOS_PSET2_BRONZE.SMART_ARCHIVE_STAGE
         FILE_FORMAT = S_CDATOS_PSET2.S_CDATOS_PSET2_BRONZE.SMART_CSV_FORMAT
 
+  #? Por si el stage ya existia (p. ej. creado por el bootstrap SQL con otro formato), se fuerza
+  #? que use SMART_CSV_FORMAT. CREATE IF NOT EXISTS no modifica un objeto existente; ALTER si.
   - id: configure_smart_archive_stage
     type: io.kestra.plugin.jdbc.snowflake.Query
     retry:
@@ -87,6 +140,16 @@ tasks:
       ALTER STAGE S_CDATOS_PSET2.S_CDATOS_PSET2_BRONZE.SMART_ARCHIVE_STAGE
         SET FILE_FORMAT = S_CDATOS_PSET2.S_CDATOS_PSET2_BRONZE.SMART_CSV_FORMAT
 
+  #? Tabla Bronze. Esquema GENERICO (igual para los 3 datasets):
+  #?   SOURCE_ARCHIVE  nombre del ZIP de origen            \
+  #?   SOURCE_FILE     CSV dentro del ZIP                   } <- juntos = clave natural de la fila
+  #?   SOURCE_ROW      numero de linea dentro del CSV      /     (se usa en el MERGE)
+  #?   SOURCE_DATE     fecha del archivo diario (NULL en etiquetas)
+  #?   SOURCE_SHA256   hash del contenido -> detecta si una fila cambio al recargar
+  #?   RAW_RECORD      VARIANT (JSON) con TODAS las columnas originales como texto
+  #?   INGESTED_AT     cuando se cargo/actualizo
+  #? Por que VARIANT y texto: Bronze debe conservar el dato tal cual; si se tipara aqui y un
+  #? valor no convirtiera, se perderia informacion. El tipado se hace en Silver con TRY_TO_*.
   - id: create_smart_2018_table
     type: io.kestra.plugin.jdbc.snowflake.Query
     retry:
@@ -112,6 +175,7 @@ tasks:
         INGESTED_AT TIMESTAMP_LTZ DEFAULT CURRENT_TIMESTAMP()
       )
 
+  #? 2019 y etiquetas copian la estructura de 2018 con CREATE TABLE ... LIKE (mismo esquema).
   - id: create_smart_2019_table
     type: io.kestra.plugin.jdbc.snowflake.Query
     retry:
@@ -156,6 +220,18 @@ tasks:
       CREATE TABLE IF NOT EXISTS S_CDATOS_PSET2.S_CDATOS_PSET2_BRONZE.SSD_FAILURE_LABEL_RAW
         LIKE S_CDATOS_PSET2.S_CDATOS_PSET2_BRONZE.SMART_2018_RAW
 
+  #? ========================================================================================
+  #? BLOQUE 2: PLANIFICACION. Decide QUE archivos cargar y COMO repartirlos.
+  #? ----------------------------------------------------------------------------------------
+  #? Ejecuta prepare_bronze.py en modo "plan". Lee el ZIP montado en /usr/data/landing
+  #? (solo lectura, ver docker-compose), filtra por las fechas de backfill y agrupa los dias en
+  #? paquetes de 2 meses. Resultado: partitions.json, p. ej.
+  #?   [{"id":"2018-01_to_2018-02","dates":["2018-01-01",...]}, {...}]
+  #? Process = corre el comando dentro del propio contenedor de Kestra (no levanta otro Docker).
+  #? Los inputs se pasan como variables de entorno; default('') convierte "sin valor" en vacio.
+  #? No tiene retry a proposito: si falla es por un error DETERMINISTA (ZIP faltante, fechas mal
+  #? escritas, esquema distinto) y reintentar daria el mismo error.
+  #? ========================================================================================
   - id: plan_partitions
     type: io.kestra.plugin.scripts.shell.Commands
     taskRunner:
@@ -166,18 +242,35 @@ tasks:
       DATASET: "{{ inputs.dataset }}"
     commands:
       - python3 /workspace/kestra/flows/prepare_bronze.py plan partitions.json
+    #? outputFiles: Kestra guarda partitions.json en su storage interno para que la siguiente
+    #? tarea lo lea con read(outputs.plan_partitions.outputFiles[...]).
     outputFiles: [partitions.json]
 
+  #? ========================================================================================
+  #? BLOQUE 3: EXTRACCION + SUBIDA, en paralelo por paquete y secuencial por dia.
+  #? ----------------------------------------------------------------------------------------
+  #? ForEach externo: un "worker" por cada paquete de 2 meses; hasta 6 a la vez
+  #? (6 x 2 meses = 1 ano completo en paralelo).
+  #? fromJson(read(...)) = leer partitions.json y convertirlo en lista.
+  #? ========================================================================================
   - id: partition_workers
     type: io.kestra.plugin.core.flow.ForEach
     values: "{{ fromJson(read(outputs.plan_partitions.outputFiles['partitions.json'])) }}"
     concurrencyLimit: 6
     tasks:
+      #? ForEach interno: recorre los dias del paquete UNO POR UNO (concurrencyLimit: 1).
+      #? taskrun.value del ForEach externo es el paquete (JSON) -> .dates es su lista de dias.
+      #? Secuencial para que en disco solo exista UN CSV diario por worker a la vez: un ano
+      #? completo descomprimido pesa ~38 GiB y no cabe/no conviene materializarlo.
       - id: worker_days
         type: io.kestra.plugin.core.flow.ForEach
         values: "{{ fromJson(taskrun.value).dates }}"
         concurrencyLimit: 1
         tasks:
+          #? 3a. Extraer un dia: valida el CSV dentro del ZIP y lo reescribe agregando las
+          #? columnas de linaje (archivo, fila, fecha). Aqui taskrun.value ya es el dia
+          #? (ej. 2018-01-05) o la palabra failure_labels.
+          #? La ruta incluye execution.id para que dos ejecuciones nunca pisen sus archivos.
           - id: prepare_day
             type: io.kestra.plugin.scripts.shell.Commands
             taskRunner:
@@ -188,6 +281,12 @@ tasks:
               - mkdir -p "/tmp/kestra-wd/bronze/{{ execution.id }}/{{ inputs.dataset }}/{{ taskrun.value }}"
               - python3 /workspace/kestra/flows/prepare_bronze.py extract "{{ taskrun.value }}" "/tmp/kestra-wd/bronze/{{ execution.id }}/{{ inputs.dataset }}/{{ taskrun.value }}/bronze_rows.csv"
 
+          #? 3b. PUT = subir el archivo local al stage interno de Snowflake.
+          #? AUTO_COMPRESS lo sube como .csv.gz (menos red); OVERWRITE permite reintentar el
+          #? mismo dia sin error de "archivo ya existe". Retry mas paciente que el DDL porque
+          #? un upload grande puede fallar por red (hasta 30 min en total).
+          #? Nota: el SQL debe EMPEZAR con PUT (el driver JDBC lo detecta asi); por eso no se
+          #? ponen comentarios dentro del bloque sql.
           - id: upload_day
             type: io.kestra.plugin.jdbc.snowflake.Query
             retry:
@@ -211,6 +310,7 @@ tasks:
                 @S_CDATOS_PSET2.S_CDATOS_PSET2_BRONZE.SMART_ARCHIVE_STAGE/kestra/{{ execution.id }}/{{ inputs.dataset }}/{{ taskrun.value }}/
                 AUTO_COMPRESS = TRUE OVERWRITE = TRUE
 
+          #? 3c. Borrar el CSV local ya subido -> el disco nunca acumula el ano completo.
           - id: cleanup_day
             type: io.kestra.plugin.scripts.shell.Commands
             taskRunner:
@@ -218,6 +318,28 @@ tasks:
             commands:
               - rm -f "/tmp/kestra-wd/bronze/{{ execution.id }}/{{ inputs.dataset }}/{{ taskrun.value }}/bronze_rows.csv"
 
+  #? ========================================================================================
+  #? BLOQUE 4: MERGE del stage a la tabla Bronze (un solo statement para toda la ejecucion).
+  #? ----------------------------------------------------------------------------------------
+  #? - Las 3 primeras lineas son Pebble (motor de plantillas de Kestra, sintaxis tipo Jinja):
+  #?   eligen la tabla destino segun el input dataset.
+  #? - FROM @stage/kestra/<execution.id>/<dataset>/ lee SOLO los archivos de ESTA ejecucion.
+  #?   $1, $2, ... = columna 1, 2, ... del CSV del stage. $1..$4 son el linaje que agrego el
+  #?   script; desde $5 vienen las columnas originales de la fuente.
+  #? - OBJECT_CONSTRUCT_KEEP_NULL arma el VARIANT {"disk_id": "...", "ds": "...", ...}
+  #?   conservando las claves aunque el valor sea NULL (asi se sabe que la columna existia).
+  #?   NULLIF(x,'') convierte texto vacio en NULL.
+  #? - SHA2(TO_JSON(raw_record)) = huella digital de la fila.
+  #? - ON (archive, file, row) = clave natural. Esto hace la carga IDEMPOTENTE:
+  #?     * fila nueva                    -> INSERT
+  #?     * fila existente y mismo hash   -> no se toca (recargar no duplica)
+  #?     * fila existente y hash distinto-> UPDATE (la fuente se corrigio)
+  #?   Nunca hay DELETE: si un archivo nuevo omite una fila, Bronze conserva la historica.
+  #? - Si hay que agregar/quitar una columna de la fuente: cambiar esta lista Y SMART_HEADERS en
+  #?   prepare_bronze.py (el orden de $n debe coincidir con el orden del CSV).
+  #? Retry: 3 intentos y hasta 2 h porque un ano completo es un MERGE de cientos de millones
+  #? de filas.
+  #? ========================================================================================
   - id: merge_csv
     type: io.kestra.plugin.jdbc.snowflake.Query
     retry:
@@ -299,6 +421,13 @@ tasks:
         VALUES (source.source_archive,source.source_file,source.source_row,
                 source.source_date,source.source_sha256,source.raw_record);
 
+  #? ========================================================================================
+  #? BLOQUE 5: RECONCILIACION. "Lo que subi, ¿quedo en Bronze?"
+  #? ----------------------------------------------------------------------------------------
+  #? LEFT JOIN de cada fila del stage (de ESTA ejecucion) contra la tabla destino por la clave
+  #? natural; las que no encuentran pareja (t.SOURCE_ROW IS NULL) son filas perdidas.
+  #? fetchType FETCH_ONE -> devuelve una sola fila, accesible como outputs.verify_load.row.
+  #? ========================================================================================
   - id: verify_load
     type: io.kestra.plugin.jdbc.snowflake.Query
     retry:
@@ -330,6 +459,8 @@ tasks:
        AND t.SOURCE_ROW=s.$3::NUMBER
       WHERE t.SOURCE_ROW IS NULL
 
+  #? Si falto aunque sea una fila, se marca la ejecucion como FAILED explicitamente.
+  #? Sin esto el flow terminaria en SUCCESS aunque la carga estuviera incompleta.
   - id: fail_if_incomplete
     type: io.kestra.plugin.core.execution.Fail
     condition: "{{ outputs.verify_load.row.MISSING_ROWS > 0 }}"
