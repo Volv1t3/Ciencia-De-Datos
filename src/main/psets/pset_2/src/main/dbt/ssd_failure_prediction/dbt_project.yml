@@ -1,18 +1,30 @@
+#? Archivo principal del proyecto dbt. dbt lo busca en la carpeta desde donde se corre.
+#? Capas: Silver (limpieza/tipado) y Gold (star schema). Bronze NO es de dbt: lo carga Kestra
+#? y dbt lo lee como source (models/sources/sources.yml).
 name: ssd_failure_prediction
 version: "1.0.0"
 config-version: 2
+#? Nombre del perfil de conexion en profiles.yml (src/res/config/dbt/profiles).
 profile: ssd_failure_prediction
 
 model-paths: ["models"]
 macro-paths: ["macros"]
 test-paths: ["tests"]
+#? Carpetas que borra 'dbt clean' (compilados y paquetes descargados).
 clean-targets: ["target", "dbt_packages"]
 
+#? Configuracion por carpeta (el + indica config que se hereda a todos los modelos de la carpeta).
+#? Un modelo puede sobreescribirla en su propio config(...) (los de silver/smart/ usan 'table').
 models:
   ssd_failure_prediction:
+    #? silver/: incremental por defecto -> los 3 modelos base (smart_2018/2019, ssd_failure_labels)
+    #? no reprocesan millones de filas en cada corrida.
     silver:
       +materialized: incremental
       +schema: S_CDATOS_PSET2_SILVER
+    #? gold/: table -> se reconstruye completo en cada corrida (CREATE OR REPLACE). Es simple y
+    #? garantiza consistencia entre dimensiones y hechos.
+    #? +schema: esquema destino; generate_schema_name.sql hace que se use tal cual.
     gold:
       +materialized: table
       +schema: S_CDATOS_PSET2_GOLD

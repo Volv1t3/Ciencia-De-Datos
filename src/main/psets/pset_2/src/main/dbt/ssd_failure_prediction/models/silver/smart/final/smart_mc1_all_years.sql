@@ -1,3 +1,4 @@
+--? SILVER FINAL MC1 (2018 + 2019). Entrada de fct_smart_daily_mc1. Mismo patron UNION ALL.
 {{
     config(
         alias='SMART_MC1_ALL_YEARS',

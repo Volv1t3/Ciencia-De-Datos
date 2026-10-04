@@ -1,10 +1,15 @@
+#? SOURCES: declara las tablas que dbt NO construye (las carga Kestra en Bronze).
+#? En los modelos se referencian con source('bronze', 'smart_2018_raw') en vez del nombre fijo:
+#? asi dbt dibuja el linaje Bronze -> Silver -> Gold y el esquema se cambia en un solo lugar.
 version: 2
 
 sources:
   - name: bronze
     description: Source-faithful Alibaba SMART telemetry and failure labels loaded by Kestra.
+    #? La base sale del .env (variable que docker-compose pasa al contenedor dbt).
     database: "{{ env_var('DBT_SNOWFLAKE_DATABASE') }}"
     schema: S_CDATOS_PSET2_BRONZE
+    #? Snowflake no distingue mayusculas en nombres sin comillas: smart_2018_raw = SMART_2018_RAW.
     tables:
       - name: smart_2018_raw
       - name: smart_2019_raw

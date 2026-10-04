@@ -1,3 +1,10 @@
+{#? Genera las columnas tipadas de los 51 atributos SMART: n_X (normalizado) y r_X (raw) = 102 columnas. #}
+{#? Se usa en silver/smart_2018.sql y smart_2019.sql para no escribir 102 lineas a mano. #}
+{#? Ejemplo de una iteracion: , try_to_decimal(raw_record:n_5::varchar, 38, 6) as n_5 #}
+{#? NUMBER(38,6): 38 digitos con 6 decimales, suficiente para contadores raw enormes y normalizados. #}
+{#? try_to_decimal: texto no numerico -> NULL en vez de error (el dato original queda en Bronze). #}
+{#? Nota: la lista de IDs esta repetida en smart_attribute_ids() de secondary_silver_smart_columns.sql; #}
+{#? si se agrega un atributo hay que cambiar AMBAS (y tambien la ingesta de Kestra). #}
 {% macro smart_attribute_columns(raw_record='raw_record') -%}
     {%- set attribute_ids = [
         1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13,

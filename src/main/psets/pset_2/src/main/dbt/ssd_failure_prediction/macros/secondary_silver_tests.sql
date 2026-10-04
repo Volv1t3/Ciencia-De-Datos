@@ -1,3 +1,6 @@
+{#? TESTS GENERICOS PROPIOS de la capa Silver. Regla de dbt: un test PASA si su query devuelve 0 filas; #}
+{#? cada fila devuelta es una violacion. Se aplican desde models/silver/smart/schema.yml. #}
+{#? Para tablas de AUDITORIA: toda fila debe tener todas las mediciones nulas (si no, se enruto mal). #}
 {% test all_retained_smart_attributes_are_null(model) %}
 select silver_record_id
 from {{ model }}
@@ -5,6 +8,9 @@ where not ({{ all_retained_smart_attributes_null() }})
 {% endtest %}
 
 
+{#? La tabla final (UNION ALL de 2018 y 2019) debe ser EXACTAMENTE la suma de sus dos entradas. #}
+{#? Se compara en ambos sentidos con MINUS: filas que faltan y filas que sobran -> ambas deben ser 0. #}
+{#? Garantiza que la union no perdio, duplico ni invento filas. #}
 {% test smart_year_union_reconciles(model, model_2018, model_2019, feature_scope) %}
     {%- if feature_scope == 'global' -%}
         {%- set feature_columns_macro = 'retained_smart_feature_columns' -%}
@@ -60,6 +66,7 @@ from unexpected_in_merge
 {% endtest %}
 
 
+{#? Para tablas LIMPIAS: ninguna fila puede tener todas las mediciones nulas. #}
 {% test at_least_one_retained_smart_attribute_is_present(model) %}
 select silver_record_id
 from {{ model }}
@@ -67,6 +74,8 @@ where {{ all_retained_smart_attributes_null() }}
 {% endtest %}
 
 
+{#? Verifica en information_schema que las columnas eliminadas por la politica de nulos #}
+{#? realmente NO existen fisicamente en la tabla. #}
 {% test smart_columns_absent(model, column_scope) %}
     {%- if column_scope == 'global' -%}
         {%- set forbidden_columns = globally_removed_smart_column_names() -%}
@@ -90,6 +99,8 @@ where upper(table_schema) = upper('{{ model.schema }}')
 {% endtest %}
 
 
+{#? Particion sin perdida: base Silver = filas limpias UNION ALL filas de auditoria, exactamente. #}
+{#? Cada fila de origen esta en una (y solo una) de las dos salidas; ninguna se pierde ni se inventa. #}
 {% test smart_source_partition_reconciles(model, source_model, audit_model) %}
 with source_rows as (
     select

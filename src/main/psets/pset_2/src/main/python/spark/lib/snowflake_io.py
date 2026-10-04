@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+#? Helpers compartidos por notebooks y jobs del contenedor 'spark' (conector clasico
+#? spark-snowflake). El job de la OBT NO usa este archivo: usa Snowpark Connect.
 import os
 from collections.abc import Mapping
 
 from pyspark.sql import DataFrame, SparkSession
 
+#? Nombre del data source del conector spark-snowflake.
 SNOWFLAKE_SOURCE_NAME = "net.snowflake.spark.snowflake"
 
 
@@ -17,6 +20,8 @@ def _required_env(name: str) -> str:
     return value
 
 
+#? Opciones de conexion leidas del entorno. autopushdown=on: los filtros/joins se traducen a
+#? SQL y se ejecutan en Snowflake en vez de traer todos los datos a Spark.
 def snowflake_options(schema: str | None = None) -> dict[str, str]:
     """Build connector options without logging or persisting credentials."""
     account = _required_env("SNOWFLAKE_ACCOUNT")
@@ -37,6 +42,7 @@ def snowflake_options(schema: str | None = None) -> dict[str, str]:
     return options
 
 
+#? Sesion Spark local (local[*], ver spark-defaults.conf).
 def create_spark_session(app_name: str = "ssd-failure-notebook") -> SparkSession:
     """Create the local Spark driver used by the notebook kernel."""
     return (
@@ -47,6 +53,7 @@ def create_spark_session(app_name: str = "ssd-failure-notebook") -> SparkSession
     )
 
 
+#? Tabla completa como DataFrame perezoso (no lee nada hasta una accion).
 def read_snowflake_table(
     spark: SparkSession,
     table: str,
@@ -67,6 +74,7 @@ def read_snowflake_table(
     )
 
 
+#? Resultado de una query SELECT como DataFrame.
 def read_snowflake_query(
     spark: SparkSession,
     query: str,
