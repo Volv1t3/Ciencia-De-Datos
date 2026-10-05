@@ -82,22 +82,43 @@ Variantes útiles (se agregan al final del comando anterior):
 | Solo tests | cambiar `build` por `test` |
 | Documentación navegable con el DAG | `docs generate` |
 
-## 5. OBT (Spark con Snowpark Connect)
+## 5. Spark y OBT
+
+### 5.1 Verificación de conectividad y pruebas unitarias de contrato
+
+Antes de correr el job pesado en Snowflake, se pueden verificar los componentes de Spark:
+
+```bash
+# 1. Comprobar que el conector Spark-Snowflake está en el classpath (humo local)
+docker compose --env-file src/res/env/.env exec spark \
+  /opt/spark/bin/spark-submit /opt/spark/jobs/build_obt.py
+
+# 2. Probar conectividad real y credenciales contra Snowflake (SELECT liviano)
+docker compose --env-file src/res/env/.env exec spark \
+  /opt/spark/bin/spark-submit /opt/spark/jobs/check_snowflake_connection.py
+
+# 3. Correr pruebas unitarias de contrato de la OBT (esquema, ventanas y paridad sin Snowflake)
+docker compose --env-file src/res/env/.env run --rm --no-deps \
+  -v .:/workspace:ro snowpark-connect \
+  python /workspace/src/test/python/spark/test_build_mc1_obt_contract.py
+```
+
+### 5.2 Construcción y publicación de la OBT (Snowpark Connect)
 
 ```bash
 docker compose --env-file src/res/env/.env build snowpark-connect
 
-# a) Solo validar contratos (no escribe nada)
+# a) Solo validar contratos en Snowflake (no escribe tablas ni auditoría)
 docker compose --env-file src/res/env/.env run --rm --no-deps snowpark-connect \
   python /opt/spark/jobs/build_mc1_obt.py \
   --start-date 2018-01-01 --end-date 2018-01-31 --ssd-limit 100 --validate-only
 
-# b) Corrida de desarrollo: escribe y valida stages, NO publica
+# b) Corrida de desarrollo acotada: escribe y valida stages, NO publica a las tablas finales
 docker compose --env-file src/res/env/.env run --rm --no-deps snowpark-connect \
   python /opt/spark/jobs/build_mc1_obt.py \
   --start-date 2018-01-01 --end-date 2018-01-31 --ssd-limit 100
 
-# c) Producción: todo el rango, publica OBT_MC1_RN / _R / _N
+# c) Producción: rango completo, valida etapas y publica OBT_MC1_RN / _R / _N mediante CLONE
 docker compose --env-file src/res/env/.env run --rm --no-deps snowpark-connect \
   python /opt/spark/jobs/build_mc1_obt.py
 ```

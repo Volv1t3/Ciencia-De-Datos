@@ -92,6 +92,50 @@ se escribe una fila `FAILED_VALIDATION` en `OBT_MC1_RUN_AUDIT` y el proceso term
 `CREATE OR REPLACE TABLE ... CLONE`. Es una copia *zero-copy* e instantánea, así que nadie lee
 nunca una OBT a medio escribir.
 
+### Pruebas unitarias y de contrato locales (sin Snowflake)
+
+Para validar la lógica de transformación, el cálculo de ventanas y la integridad de esquemas sin
+incurrir en costos ni depender de la red, se implementó una suite de pruebas unitarias en
+[`src/test/python/spark/test_build_mc1_obt_contract.py`](../src/test/python/spark/test_build_mc1_obt_contract.py):
+
+- **Motor local:** corre en PySpark con `local[1]`, completamente desconectado de Snowflake.
+- **Fixture sintético:** genera 2 observaciones en días consecutivos con falla programada en el día
+  20 y seguimiento hasta el día 35.
+- **Contrato de esquemas:** verifica que `OBT_MC1_RN` tenga exactamente **847 columnas** y que las
+  variantes `OBT_MC1_R` y `OBT_MC1_N` tengan **429 columnas** cada una, sin colisiones de nombres.
+- **Ventanas por calendario:** prueba que `rangeBetween` respete el avance por días calendario.
+- **Compuertas de auditoría:** ejecuta `validate_rn_stage` sobre el DataFrame de prueba y verifica
+  que los contadores de inconsistencias en `AuditMetrics` sean estrictamente cero.
+- **Paridad relacional:** proyecta las variantes R y N y ejecuta `validate_variant_parity`
+  (usando `exceptAll` en ambos sentidos) para garantizar que ninguna variante diverja de RN.
+
+Ejecución de las pruebas locales:
+```bash
+docker compose --env-file src/res/env/.env run --rm --no-deps \
+  -v .:/workspace:ro snowpark-connect \
+  python /workspace/src/test/python/spark/test_build_mc1_obt_contract.py
+```
+
+## Arquitectura dual de Spark en el proyecto
+
+El proyecto utiliza dos entornos de Apache Spark especializados y desacoplados:
+
+| Componente | Servicio Docker | Versión de Spark | Conector | Propósito |
+| --- | --- | --- | --- | --- |
+| **EDA Interactivo** | `spark` | 4.0.4 (Scala 2.13, Java 21) | `spark-snowflake` 3.2.2 (JDBC) | Notebooks en JupyterLab (puerto 4041) con `autopushdown=on` para consultas analíticas |
+| **Construcción OBT** | `snowpark-connect` | 3.5.6 (Scala 2.12, Java 17) | `snowpark-connect` 1.44.0 | Job batch de producción (`build_mc1_obt.py`) ejecutado remotamente en Snowflake |
+
+### Scripts auxiliares y librerías compartidas
+
+- [`src/main/python/spark/lib/snowflake_io.py`](../src/main/python/spark/lib/snowflake_io.py): helper
+  compartido para el conector clásico `spark-snowflake` que abstrae `create_spark_session`,
+  `read_snowflake_table` y `read_snowflake_query` con configuración automática de UTC y pushdown.
+- [`src/main/python/spark/jobs/check_snowflake_connection.py`](../src/main/python/spark/jobs/check_snowflake_connection.py):
+  script de diagnóstico que ejecuta un `SELECT CURRENT_ACCOUNT(), ...` en Snowflake para verificar
+  credenciales y conectividad de red.
+- [`src/main/python/spark/jobs/build_obt.py`](../src/main/python/spark/jobs/build_obt.py): smoke test
+  ligero para comprobar que la JVM de Spark 4 registra correctamente el data source de Snowflake.
+
 ## Por qué tres variantes (RN, R, N)
 
 `R` (raw) y `N` (normalizado por el fabricante) son dos representaciones del mismo atributo. Su
@@ -107,3 +151,4 @@ de la misma tabla RN.
 | Análisis exploratorio y reportes (fallas por mes, comparación entre modelos, tasa de falla por año) | **Star schema (Gold)** | Las dimensiones conformadas permiten agregar por cualquier eje sin duplicar datos; los facts siguen siendo reutilizables |
 | Entrenamiento y scoring del modelo predictivo MC1 | **OBT** | El modelo necesita una fila por observación con todas las features y la etiqueta ya calculadas, sin joins ni ventanas en el momento de entrenar |
 | Agregar un modelo de SSD nuevo o cambiar la definición de la etiqueta | Se cambia en Gold/Spark y se regenera la OBT | La OBT es un derivado desechable: se reconstruye desde Gold |
+

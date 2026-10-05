@@ -25,9 +25,12 @@ Start here, then follow the layer links in pipeline order:
 | dbt | [dbt transformation project](src/main/dbt/ssd_failure_prediction/README.md) | Project structure, lineage, commands, materializations, and navigation into Silver and Gold. |
 | Silver | [Silver processing](src/main/dbt/ssd_failure_prediction/models/silver/README.md) | Baseline extraction, structural-null processing, MC1 specialization, audit quarantine, and final all-year tables. |
 | Gold | [Gold dimensional model](src/main/dbt/ssd_failure_prediction/models/gold/README.md) | Dimensions, facts, keys, relationships, and Silver-to-Gold column reconciliation. |
+| Spark platform | [Spark platform](src/main/python/spark/README.md) | Dual runtime architecture (Spark 4 / Jupyter vs Snowpark Connect), directory layout, and workflows. |
 | EDA | [Spark notebooks](src/main/python/spark/notebooks/README.md) | DataGrip/Jupyter execution, Snowflake pushdown, generated EDA notebooks, and packaged null analysis. |
 | EDA evidence | [Null-structure analysis book](src/main/python/spark/notebooks/ssd_null_analysis_book/README.md) | Reproducible notebooks, interpretation chapters, modeling policy, and packaged CSV evidence. |
 | OBT | [Snowpark Connect jobs](src/main/python/spark/jobs/README.md) | MC1 rolling features, labels, validation, audit, staging, and canonical publication. |
+| Spark tests | [Spark contract unit tests](src/test/python/spark/README.md) | Offline unit testing of OBT schemas (847/429 cols), calendar windows, and projection parity. |
+| Spark config | [Spark configuration](src/res/config/spark/README.md) | Engine defaults, memory limits, Log4j 2 suppression, requirements, and custom Jupyter kernel. |
 | Runtimes | [Custom Docker images](src/res/docker/custom-images/README.md) | Spark/Jupyter and Snowpark Connect image composition and validation. |
 
 The assignment and implementation specifications remain versioned as supporting

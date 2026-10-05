@@ -1,7 +1,20 @@
-# PySpark itself is supplied by the pinned Apache Spark 4.0.4 image.
+#? ==========================================================================================
+#? DEPENDENCIAS PYTHON PARA EL CONTENEDOR SPARK / JUPYTER (requirements.txt)
+#? ------------------------------------------------------------------------------------------
+#? Nota: PySpark y Py4J NO se instalan aqui; ya vienen incluidos en la imagen base
+#? oficial de Apache Spark 4.0.4 (apache/spark:4.0.4-scala2.13-java21-python3-r-ubuntu).
+#? Estas librerias proveen el entorno interactivo para los notebooks de EDA.
+#? ==========================================================================================
+#? Servidor interactivo de JupyterLab accesible via navegador web o cliente IDE.
 jupyterlab==4.6.4
+#? Kernel de ejecucion Python que se conecta al launcher ipykernel_launcher.
 ipykernel==7.3.0
+#? Manipulacion de DataFrames locales para visualizacion de resultados agregados.
 pandas==2.3.3
+#? Motor de graficacion estatica (histogramas, boxplots, diagramas de dispersion).
 matplotlib==3.10.8
+#? Capa estadistica de alto nivel sobre matplotlib (estilos tematicos y heatmaps).
 seaborn==0.13.2
+#? Serializacion en formato Apache Arrow para transferencia rapida entre JVM y Python.
 pyarrow==22.0.0
+

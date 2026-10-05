@@ -1,11 +1,34 @@
-"""Local-mode Spark connectivity skeleton for the future Snowflake OBT job."""
+"""Esqueleto de conectividad Spark en modo local para verificar el conector de Snowflake.
 
-#? Script de humo (skeleton) del contenedor 'spark': solo verifica que Spark arranca y que el
-#? conector spark-snowflake esta instalado. NO construye la OBT; la OBT real es build_mc1_obt.py.
+Este script actua como una prueba de humo (smoke test) de diagnostico para el runtime del
+contenedor clasico de Spark. Inicializa una SparkSession local, confirma las versiones de Spark
+y Python, y consulta el registro DataSource de la JVM de Spark para asegurar que el archivo JAR
+del conector net.snowflake.spark.snowflake este cargado en el classpath. No ejecuta transformaciones
+pesadas de datos (el generador canonico de la OBT es build_mc1_obt.py).
+"""
+
+
+#? ==========================================================================================
+#? SCRIPT DE HUMO / CONECTIVIDAD: build_obt.py
+#? ------------------------------------------------------------------------------------------
+#? Proposito:
+#?   Verificar que el contenedor 'spark' tiene una JVM funcional de Apache Spark 4.0.4 y que
+#?   el conector 'net.snowflake.spark.snowflake' se encuentra correctamente registrado en el
+#?   classpath (/opt/spark/jars/).
+#?
+#? Diferencia con build_mc1_obt.py:
+#?   - build_obt.py: Smoke test local ligero para el conector clasico spark-snowflake.
+#?   - build_mc1_obt.py: Job productivo de generacion de OBT que usa Snowpark Connect.
+#?
+#? Como se ejecuta:
+#?   docker compose --env-file src/res/env/.env exec spark \
+#?     /opt/spark/bin/spark-submit /opt/spark/jobs/build_obt.py
+#? ==========================================================================================
 import os
 import platform
 
 from pyspark.sql import SparkSession
+
 
 
 def main() -> None:
