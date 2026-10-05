@@ -162,5 +162,5 @@ docker compose --env-file src/res/env/.env run --rm --no-deps snowpark-connect \
 ## Políticas de seguridad y aislamiento de credenciales
 
 1. **Cero credenciales en código:** Ningún archivo Python ni imagen Docker almacena contraseñas o tokens.
-2. **Inyección por entorno:** Todos los parámetros (`SNOWFLAKE_ACCOUNT`, `SNOWFLAKE_USER`, `SNOWFLAKE_PASSWORD`, `SNOWFLAKE_ROLE`, `SNOWFLAKE_WAREHOUSE`, `SNOWFLAKE_WAREHOUSE_HIGH_COMPUTE`) se leen exclusivamente del archivo `.env` del host.
-3. **Sin fugas en logs:** Los scripts auxiliares y loggers sanitizan las cadenas de conexión para evitar registrar secretos en consola o disco.
+2. **Inyección por entorno:** El código lee las variables de entorno del contenedor. Compose carga `src/res/env/.env` mediante `--env-file` e inyecta los parámetros; Python no lee directamente ese archivo. Para `snowpark-connect`, Compose asigna `SNOWFLAKE_WAREHOUSE_HIGH_COMPUTE` a `SNOWFLAKE_WAREHOUSE`.
+3. **Alcance de protección de logs:** El helper clásico `snowflake_io.py` no imprime ni persiste explícitamente las opciones de conexión. Esto no garantiza la sanitización de todos los logs o excepciones de Spark, JDBC y los conectores. Revise y redacte los diagnósticos antes de compartirlos; no habilite logs de depuración con credenciales reales sin revisar su contenido.
