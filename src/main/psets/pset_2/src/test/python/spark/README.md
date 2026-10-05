@@ -1,6 +1,6 @@
 # Pruebas unitarias y de contrato de Spark
 
-[Inicio del proyecto](../../../../../README.md) · [Plataforma Spark](../../main/python/spark/README.md) · [Jobs OBT MC1](../../main/python/spark/jobs/README.md) · **Pruebas de contrato Spark**
+[Inicio del proyecto](../../../../../README.md) · [Plataforma Spark](../../../main/python/spark/README.md) · [Jobs OBT MC1](../../../main/python/spark/jobs/README.md) · **Pruebas de contrato Spark**
 
 Este directorio contiene la suite de pruebas unitarias y de validación de contratos para el generador de la One Big Table (OBT) en PySpark.
 
@@ -8,7 +8,7 @@ Este directorio contiene la suite de pruebas unitarias y de validación de contr
 
 ## Propósito y diseño técnico
 
-El generador canónico de la OBT ([`build_mc1_obt.py`](../../main/python/spark/jobs/build_mc1_obt.py)) está diseñado para ejecutarse sobre Snowflake mediante Snowpark Connect. Sin embargo, probar la lógica directamente contra un almacén en la nube durante el desarrollo es lento, consume créditos de cómputo y requiere conectividad de red y credenciales activas.
+El generador canónico de la OBT ([`build_mc1_obt.py`](../../../main/python/spark/jobs/build_mc1_obt.py)) está diseñado para ejecutarse sobre Snowflake mediante Snowpark Connect. Sin embargo, probar la lógica directamente contra un almacén en la nube durante el desarrollo es lento, consume créditos de cómputo y requiere conectividad de red y credenciales activas.
 
 [`test_build_mc1_obt_contract.py`](test_build_mc1_obt_contract.py) aísla y verifica la lógica central de transformación de PySpark utilizando una sesión de Spark local y monohilo (`local[1]`).
 
@@ -50,6 +50,10 @@ Garantiza que la lista de columnas coincida exactamente con la especificación t
 - **Clasificación de etiquetas:** Confirma que ambas observaciones se marquen como `LABEL_STATUS = 'POSITIVE'` con `TARGET_30D = 1`, dado que la falla ocurre a 18 y 19 días de distancia.
 - **Compuertas de validación de stage:** Ejecuta `validate_rn_stage` sobre el DataFrame sintético y verifica que `AuditMetrics` registre cero inconsistencias numéricas o conteos fuera de rango.
 - **Paridad relacional bidireccional:** Comprueba que las proyecciones `OBT_MC1_R` y `OBT_MC1_N` contengan exactamente las mismas filas que `OBT_MC1_RN` evaluando `exceptAll` en ambos sentidos mediante `validate_variant_parity`.
+
+El fixture cubre únicamente etiquetas `POSITIVE`. No comprueba los estados
+`NEGATIVE`, `CENSORED`, `SAME_DAY_FAILURE` ni `POST_FAILURE`; estos requieren
+casos adicionales. Tampoco verifica rendimiento ni ejecución remota en Snowflake.
 
 ---
 

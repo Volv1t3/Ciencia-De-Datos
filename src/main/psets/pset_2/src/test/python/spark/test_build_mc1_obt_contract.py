@@ -15,7 +15,8 @@ etiquetas y compuertas bloqueantes de validacion sobre un fixture sintetico de d
 #?     1. Contratos de esquema exactos: 847 columnas para OBT_MC1_RN y 429 para OBT_MC1_R / N.
 #?     2. Unicidad de columnas y prefijo/sufijo contractual (identidad y etiqueta).
 #?     3. Calculo correcto de ventanas moviles basadas en calendario (rangeBetween en dias).
-#?     4. Asignacion logica de estados de etiqueta (POSITIVE, NEGATIVE, CENSORED, etc.) y TARGET_30D.
+#?     4. Etiqueta POSITIVE y TARGET_30D = 1 en las dos observaciones del fixture.
+#?        No cubre NEGATIVE, CENSORED, SAME_DAY_FAILURE ni POST_FAILURE.
 #?     5. Evaluacion de las funciones de validacion de stage (AuditMetrics, conteos no negativos).
 #?     6. Paridad exacta de proyecciones entre RN y sus variantes R y N (exceptAll bidireccional).
 #?

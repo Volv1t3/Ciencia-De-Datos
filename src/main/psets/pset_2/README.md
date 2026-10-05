@@ -106,14 +106,25 @@ cp src/res/env/.env.example src/res/env/.env
 mkdir -p src/res/data/raw
 # Copy the three Tianchi archives into src/res/data/raw yourself.
 
-docker compose --env-file src/res/env/.env config
+docker compose --env-file src/res/env/.env config --quiet
 docker compose --env-file src/res/env/.env build
 docker compose --env-file src/res/env/.env up -d
 docker compose --env-file src/res/env/.env ps
 ```
 
-Open Kestra at <http://localhost:8080> and dbt-ui at
-<http://localhost:5173>. The configuration binds both to `127.0.0.1`, so they
+All Compose commands in this guide run from this directory and explicitly load
+`src/res/env/.env` for interpolation. `config --quiet` validates without printing
+resolved credentials; do not share the output of plain `config`.
+
+The unmodified flow and bootstrap require an already provisioned Snowflake
+database named `S_CDATOS_PSET2`. Set `SNOWFLAKE_DATABASE=S_CDATOS_PSET2` and
+`SNOWFLAKE_SCHEMA=S_CDATOS_PSET2_BRONZE` in the private environment file.
+Changing only that environment variable or the bootstrap database does not
+retarget the hard-coded Kestra flow. See the bootstrap procedure in
+[IMPLEMENTATION.md](IMPLEMENTATION.md#correct-execution-procedure).
+
+Open Kestra at <http://127.0.0.1:8080> and dbt-ui at
+<http://127.0.0.1:5173>. The configuration binds both to `127.0.0.1`, so they
 are not published to the local network. To use different ports, change
 `KESTRA_PORT`, `KESTRA_MANAGEMENT_PORT`, or `DBT_UI_PORT` in `src/res/env/.env`.
 
@@ -134,33 +145,34 @@ source-faithful `VARIANT` objects into the three Bronze destination tables.
 
 ```bash
 # Kestra UI and management health endpoint
-curl --fail http://localhost:${KESTRA_PORT:-8080}/
-curl --fail http://localhost:${KESTRA_MANAGEMENT_PORT:-8081}/health
+# These defaults are not loaded from .env by curl; substitute your configured ports.
+curl --fail http://127.0.0.1:8080/
+curl --fail http://127.0.0.1:8081/health
 
 # Confirm the read-only landing mount and required archive names
-docker compose exec kestra ls -l /usr/data/landing
+docker compose --env-file src/res/env/.env exec kestra ls -l /usr/data/landing
 
 # Confirm dbt and its Snowflake adapter are installed in dbt-ui's own venv
-docker compose exec dbt-ui-backend /opt/dbt-ui/backend/.venv/bin/dbt --version
+docker compose --env-file src/res/env/.env exec dbt-ui-backend /opt/dbt-ui/backend/.venv/bin/dbt --version
 
 # With valid SNOWFLAKE_* values in .env, confirm the dbt profile can connect
-docker compose exec --workdir /workspace/dbt-projects/ssd_failure_prediction \
+docker compose --env-file src/res/env/.env exec --workdir /workspace/dbt-projects/ssd_failure_prediction \
   dbt-ui-backend /opt/dbt-ui/backend/.venv/bin/dbt debug
 
 # Validate Spark runtime, Jupyter, local mode, and the installed connector
-docker compose exec spark java -version
-docker compose exec spark python3 --version
-docker compose exec spark python3 -m jupyterlab --version
-docker compose exec spark /opt/spark/bin/spark-submit --version
-docker compose exec spark /opt/spark/bin/spark-submit /opt/spark/jobs/build_obt.py
+docker compose --env-file src/res/env/.env exec spark java -version
+docker compose --env-file src/res/env/.env exec spark python3 --version
+docker compose --env-file src/res/env/.env exec spark python3 -m jupyterlab --version
+docker compose --env-file src/res/env/.env exec spark /opt/spark/bin/spark-submit --version
+docker compose --env-file src/res/env/.env exec spark /opt/spark/bin/spark-submit /opt/spark/jobs/build_obt.py
 
 # With valid SNOWFLAKE_* values, execute a small query in the configured warehouse
-docker compose exec spark /opt/spark/bin/spark-submit \
+docker compose --env-file src/res/env/.env exec spark /opt/spark/bin/spark-submit \
   /opt/spark/jobs/check_snowflake_connection.py
 
 # Verify Kestra PostgreSQL persistence after a restart
-docker compose restart kestra-postgres kestra
-docker compose ps
+docker compose --env-file src/res/env/.env restart kestra-postgres kestra
+docker compose --env-file src/res/env/.env ps
 ```
 
 `build_obt.py` does not contact Snowflake; it only starts local Spark and checks
@@ -251,8 +263,8 @@ docker compose --env-file src/res/env/.env run --rm --no-deps \
 ## Stop and reset
 
 ```bash
-docker compose down       # stops/removes containers and network; keeps volumes
-docker compose down -v    # destructive: also deletes Kestra and dbt-ui state
+docker compose --env-file src/res/env/.env down       # stops/removes containers and network; keeps volumes
+docker compose --env-file src/res/env/.env down -v    # destructive: also deletes Kestra and dbt-ui state
 ```
 
 Do not use `down -v` unless you intentionally want to erase Kestra history,
