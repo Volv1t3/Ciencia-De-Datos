@@ -1,5 +1,6 @@
 # Credenciales locales: nunca versionar
 /src/res/env/.env
+/src/res/env/.env.clabretro-trial
 
 # Fuente original (ZIP de Tianchi, varios GB): se copia a mano en la landing zone
 /src/res/data/raw/*
@@ -13,3 +14,7 @@
 # Python
 __pycache__/
 *.pyc
+
+# Estado local de MLflow (base SQLite, modelos y artefactos)
+/src/main/mlflow/*
+!/src/main/mlflow/.gitkeep

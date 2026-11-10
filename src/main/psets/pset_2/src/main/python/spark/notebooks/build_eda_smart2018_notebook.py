@@ -198,6 +198,10 @@ def univariate_statistics(column: str) -> pd.DataFrame:
     if column in _univariate_stats_cache:
         return _univariate_stats_cache[column]
     identifier = quote_identifier(column)
+    # Silver SMART values are NUMBER(38,6). Cast before sum-based aggregates:
+    # a large fixed-point intermediate sum can overflow on a full-year scan.
+    # Counts and extrema remain exact; moments use approximate FLOAT arithmetic.
+    numeric_identifier = f"{identifier}::DOUBLE"
     result = aggregate_to_pandas(f'''
         SELECT
             '{column}' AS VARIABLE,
@@ -207,12 +211,12 @@ def univariate_statistics(column: str) -> pd.DataFrame:
             ROUND(100 * COUNT_IF({identifier} IS NULL) / NULLIF(COUNT(*), 0), 6) AS NULL_PERCENT,
             MIN({identifier}) AS MINIMUM,
             APPROX_PERCENTILE({identifier}, 0.25) AS Q1,
-            AVG({identifier}) AS MEAN,
+            AVG({numeric_identifier}) AS MEAN,
             APPROX_PERCENTILE({identifier}, 0.50) AS MEDIAN,
             APPROX_PERCENTILE({identifier}, 0.75) AS Q3,
             MAX({identifier}) AS MAXIMUM,
-            STDDEV_SAMP({identifier}) AS STANDARD_DEVIATION,
-            VAR_SAMP({identifier}) AS SAMPLE_VARIANCE
+            STDDEV_SAMP({numeric_identifier}) AS STANDARD_DEVIATION,
+            VAR_SAMP({numeric_identifier}) AS SAMPLE_VARIANCE
         FROM {SMART_TABLE}
     ''')
     _univariate_stats_cache[column] = result

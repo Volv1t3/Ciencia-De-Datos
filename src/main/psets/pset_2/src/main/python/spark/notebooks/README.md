@@ -13,6 +13,13 @@ host URL and token from `JUPYTER_PORT` and `JUPYTER_TOKEN`. Select the
 interpreter or the generic `Python 3 (ipykernel)` kernel: those environments do
 not receive Spark's Python, Py4J, connector JAR, or `/opt/spark/lib` paths.
 
+The experiment notebook under `datagrip/` sends MLflow requests from this
+kernel to `http://mlflow:5000` via `MLFLOW_TRACKING_URI`. Open the tracking UI
+at `http://127.0.0.1:${MLFLOW_PORT}` on the host (default port 5000). Compose
+keeps its SQLite database and artifacts in `src/main/mlflow`; generated data in
+that directory is ignored by Git. Rebuild the `spark` image after changing
+`src/res/config/spark/requirements.txt`, then restart the notebook kernel.
+
 The custom kernel is defined in
 `src/res/config/spark/kernels/pyspark-snowflake/kernel.json`. A quick kernel
 check is:
@@ -29,18 +36,44 @@ print(pyspark.__version__)     # 4.0.4
 print(os.environ["SPARK_HOME"])  # /opt/spark
 ```
 
-Notebook code can then import the shared connector helpers directly:
+Notebook code can then import the shared connector helpers directly. For a
+large source, submit an aggregate SQL query to Snowflake and retrieve only its
+small result; a lazy `read_snowflake_table` DataFrame does not guarantee that
+every later transformation will be pushed down:
 
 ```python
-from snowflake_io import create_spark_session, read_snowflake_table
+from snowflake_io import create_spark_session, read_snowflake_query
 
 spark = create_spark_session("smart-quality-analysis")
-smart_2018 = read_snowflake_table(
+summary = read_snowflake_query(
     spark,
-    "SMART_2018",
+    "SELECT COUNT(*) AS ROW_COUNT FROM SMART_2018",
     schema="S_CDATOS_PSET2_SILVER",
-)
+).toPandas()
 ```
+
+For accounts requiring MFA on password sign-ins, create a Snowflake
+programmatic access token (PAT) for the same `SNOWFLAKE_USER` and place its
+secret in `SNOWFLAKE_EDA_PAT` in the private `src/res/env/.env`. The Spark
+container passes that token to the connector's `sfPassword` field; the human
+password is not passed to this container. A PAT replaces the password, not the
+username, and it is separate from `JUPYTER_TOKEN`. Choose a role with access to
+the EDA tables and warehouse, and ensure the PAT's role restriction matches
+`SNOWFLAKE_ROLE`. Snowflake may also require a network policy and an
+authentication policy that allows PATs. Copy the token when Snowflake displays
+it; the secret cannot be retrieved later. Do not use a TOTP code or enrollment
+key here.
+
+After editing `.env`, recreate only the Spark service and restart the notebook
+kernel before running a small Snowflake query:
+
+```bash
+docker compose --env-file src/res/env/.env up -d --no-deps --force-recreate spark
+```
+
+No image rebuild or notebook edit is needed for this credential change. PATs
+expire and must be rotated before expiration. The other Snowflake clients in
+Compose have independent credentials and are not switched to the EDA PAT.
 
 The Snowflake connector uses the configured virtual warehouse and enables
 query pushdown. Operations that cannot be pushed down still execute with the
@@ -73,6 +106,25 @@ project root with:
 python3 src/main/python/spark/notebooks/build_eda_smart2018_notebook.py --year 2018
 python3 src/main/python/spark/notebooks/build_eda_smart2018_notebook.py --year 2019
 ```
+
+The MC1 OBT notebook is generated independently from
+[`build_eda_mc1_obt_notebook.py`](build_eda_mc1_obt_notebook.py), producing
+[`EDA_MC1_OBT_CloudComputingEnabled.ipynb`](datagrip/EDA_MC1_OBT_CloudComputingEnabled.ipynb).
+It uses read-only Snowflake SQL for the full-population analysis and keeps
+the seven SMART 5 measurements (daily value, 7/14/30-day means, and
+7/14/30-day mean shifts) in separate Spanish-language blocks. An optional
+numbered family menu selects one `R`/`N` SMART attribute and activates the
+same seven independent target-comparison blocks for it; a separate field menu
+selects a SMART pair. Neither menu scans every feature. Generate and verify it
+from the project root with:
+
+```bash
+python3 src/main/python/spark/notebooks/build_eda_mc1_obt_notebook.py
+python3 src/main/python/spark/notebooks/build_eda_mc1_obt_notebook.py --check
+```
+
+Regeneration overwrites that notebook and clears its saved cell outputs. Keep
+execution evidence separately before regenerating.
 
 The labels notebook is purpose-built for its event grain and is generated with:
 

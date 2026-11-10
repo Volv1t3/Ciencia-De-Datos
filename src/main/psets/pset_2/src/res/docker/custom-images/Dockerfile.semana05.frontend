@@ -1,7 +1,7 @@
 FROM node:20-bookworm-slim AS build
 
 ARG DBT_UI_REPOSITORY=https://github.com/EricLamphere/dbt-ui.git
-ARG DBT_UI_COMMIT=1fe89c5d023cd4d7a88642091c303a75839534f9
+ARG DBT_UI_COMMIT=2103d4353798f7c58c304b421afea1ecfb301e22
 
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends ca-certificates git \

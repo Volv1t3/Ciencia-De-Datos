@@ -26,10 +26,15 @@ def snowflake_options(schema: str | None = None) -> dict[str, str]:
     """Build connector options without logging or persisting credentials."""
     account = _required_env("SNOWFLAKE_ACCOUNT")
     host = account if account.endswith(".snowflakecomputing.com") else f"{account}.snowflakecomputing.com"
+    # Snowflake accepts a PAT in the connector's password field. Prefer the
+    # notebook-specific token so the human password is unnecessary in Jupyter.
+    credential = os.getenv("SNOWFLAKE_EDA_PAT", "").strip() or os.getenv("SNOWFLAKE_PASSWORD", "").strip()
+    if not credential:
+        raise RuntimeError("Set SNOWFLAKE_EDA_PAT (preferred) or SNOWFLAKE_PASSWORD for Spark EDA")
     options = {
         "sfURL": host,
         "sfUser": _required_env("SNOWFLAKE_USER"),
-        "sfPassword": _required_env("SNOWFLAKE_PASSWORD"),
+        "sfPassword": credential,
         "sfWarehouse": _required_env("SNOWFLAKE_WAREHOUSE"),
         "sfDatabase": _required_env("SNOWFLAKE_DATABASE"),
         "sfSchema": schema or _required_env("SNOWFLAKE_SCHEMA"),

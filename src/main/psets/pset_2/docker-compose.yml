@@ -7,6 +7,7 @@
 #?   dbt-ui-backend   -> dbt Core + adaptador Snowflake (construye Silver y Gold) + API
 #?   dbt-ui           -> interfaz web para correr dbt (nginx que llama al backend)
 #?   spark            -> Spark 4 + JupyterLab, para EDA interactivo con el conector Snowflake
+#?   mlflow           -> seguimiento de experimentos y artefactos de los notebooks
 #?   snowpark-connect -> Spark 3.5 + Snowpark Connect: corre el job que construye la OBT;
 #?                       el codigo es PySpark pero el computo pesado lo ejecuta Snowflake.
 #? Uso: docker compose --env-file src/res/env/.env up -d
@@ -199,7 +200,8 @@ services:
       SF_TEMPORARY_CREDENTIAL_CACHE_DIR: /tmp/snowflake-credential-cache
       SNOWFLAKE_ACCOUNT: ${SNOWFLAKE_ACCOUNT:? set SNOWFLAKE_ACCOUNT in .env}
       SNOWFLAKE_USER: ${SNOWFLAKE_USER:? set SNOWFLAKE_USER in .env}
-      SNOWFLAKE_PASSWORD: ${SNOWFLAKE_PASSWORD:? set SNOWFLAKE_PASSWORD in .env}
+      #? PAT de EDA: Snowflake lo acepta en el campo sfPassword del conector Spark.
+      SNOWFLAKE_EDA_PAT: ${SNOWFLAKE_EDA_PAT:-}
       SNOWFLAKE_ROLE: ${SNOWFLAKE_ROLE:-}
       SNOWFLAKE_WAREHOUSE: ${SNOWFLAKE_WAREHOUSE:? set SNOWFLAKE_WAREHOUSE in .env}
       SNOWFLAKE_DATABASE: ${SNOWFLAKE_DATABASE:? set SNOWFLAKE_DATABASE in .env}
@@ -208,6 +210,8 @@ services:
       PYSPARK_PYTHON: /usr/bin/python3
       #? Permite "import pyspark" y los helpers de /opt/spark/lib (snowflake_io.py) en notebooks.
       PYTHONPATH: /opt/spark/python:/opt/spark/python/lib/py4j-0.10.9.9-src.zip:/opt/spark/lib
+      #? La URL interna usa el nombre del servicio Compose, no localhost del contenedor.
+      MLFLOW_TRACKING_URI: http://mlflow:5000
     #? 4040 = Spark UI (jobs, stages); 4041 en el host -> 8888 Jupyter.
     ports:
       - "127.0.0.1:${SPARK_UI_PORT:-4040}:4040"
@@ -223,6 +227,9 @@ services:
       #? Event logs de Spark (historial de ejecuciones).
       - ./src/res/logs/spark:/opt/spark/logs
     working_dir: /opt/spark/notebooks
+    depends_on:
+      mlflow:
+        condition: service_healthy
     #? El contenedor arranca JupyterLab (exec -> Jupyter es el PID 1 y recibe las senales).
     command:
       - bash
@@ -240,6 +247,38 @@ services:
       interval: 10s
       timeout: 5s
       retries: 18
+      start_period: 20s
+    restart: unless-stopped
+    networks:
+      - data-platform
+
+  #? ----------------------------------------------------------------------------------------
+  #? MLflow conserva metadatos y registro de modelos en SQLite; sirve artefactos a los clientes
+  #? HTTP para que los notebooks no necesiten acceso directo al directorio del servidor.
+  #? ----------------------------------------------------------------------------------------
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:v2.17.2
+    command:
+      - mlflow
+      - server
+      - --backend-store-uri
+      - sqlite:////mlflow/mlflow.db
+      - --artifacts-destination
+      - /mlflow/artifacts
+      - --serve-artifacts
+      - --host
+      - 0.0.0.0
+      - --port
+      - "5000"
+    ports:
+      - "127.0.0.1:${MLFLOW_PORT:-5000}:5000"
+    volumes:
+      - ./src/main/mlflow:/mlflow
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/health', timeout=5)"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
       start_period: 20s
     restart: unless-stopped
     networks:

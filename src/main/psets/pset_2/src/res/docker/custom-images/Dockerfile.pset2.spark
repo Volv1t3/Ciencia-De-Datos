@@ -9,7 +9,7 @@ USER root
 #? Conector spark-snowflake + driver JDBC de Snowflake, en versiones compatibles con Spark 4 / Scala 2.13.
 #? Se copian a /opt/spark/jars para que Spark los cargue automaticamente.
 RUN apt-get update \
-    && apt-get install --yes --no-install-recommends curl \
+    && apt-get install --yes --no-install-recommends curl git \
     && rm -rf /var/lib/apt/lists/* \
     && curl --fail --location --silent --show-error \
       --output /opt/spark/jars/spark-snowflake_2.13-3.2.2-spark_4.0.jar \

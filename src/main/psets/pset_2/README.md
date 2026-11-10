@@ -77,6 +77,7 @@ repeatable.
 | `src/main/dbt` | Source-controlled dbt SQL/YAML project code, visible to dbt-ui at `/workspace/dbt-projects`. |
 | `dbt_ui_data` | dbt-ui SQLite state, run history, API logs, and generated UI data. |
 | `src/main/python/spark` | Source-controlled PySpark job code. |
+| `src/main/mlflow` | Host-visible MLflow SQLite database and experiment/model artifacts. Generated contents are ignored by Git. |
 | `src/res/config` and `src/res/docker` | Runtime configuration and externally supplied/custom image definitions. |
 | `src/res/logs` | Host-visible local runtime logs and working output. |
 
@@ -136,6 +137,13 @@ DataGrip must connect to that remote Jupyter URL and use the
 `PySpark 4 + Snowflake` kernel; its local Python interpreter does not contain
 the container's Spark runtime or mounted connector helpers.
 
+MLflow is available at <http://127.0.0.1:5000> by default; set `MLFLOW_PORT` in
+`src/res/env/.env` to change the host port. Notebooks running in the Spark
+container use `MLFLOW_TRACKING_URI=http://mlflow:5000` on the Compose network.
+The database, registered models, and artifacts persist under `src/main/mlflow`
+after a container restart or recreation. Rebuild `spark` after changing its
+Python requirements so the kernel has MLflow 2.17.2 installed.
+
 Import `src/main/kestra/flows/bronze_ingestion.yml` in the Kestra UI
 (Flows → Create → Import). It validates and consolidates the selected CSV
 members, uploads CSV to the internal Snowflake stage, and idempotently merges
@@ -173,6 +181,11 @@ docker compose --env-file src/res/env/.env exec spark /opt/spark/bin/spark-submi
 # Verify Kestra PostgreSQL persistence after a restart
 docker compose --env-file src/res/env/.env restart kestra-postgres kestra
 docker compose --env-file src/res/env/.env ps
+
+# Check MLflow and its connection from the Spark notebook container
+curl --fail http://127.0.0.1:5000/health
+docker compose --env-file src/res/env/.env exec spark python3 -c \
+  'import mlflow; print(mlflow.__version__, mlflow.get_tracking_uri()); print(len(mlflow.search_experiments()))'
 ```
 
 `build_obt.py` does not contact Snowflake; it only starts local Spark and checks

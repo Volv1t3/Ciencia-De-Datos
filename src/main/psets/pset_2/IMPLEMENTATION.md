@@ -12,7 +12,7 @@ or support that source.
 
 | Area | Meaning | Contents in this pset |
 | --- | --- | --- |
-| `src/main` | Code that the student owns, edits, reviews, and versions as application logic. | Kestra flow/DAG YAML, dbt project and model YAML/SQL, and PySpark jobs. |
+| `src/main` | Code that the student owns, edits, reviews, and versions as application logic; also the requested host-visible MLflow state directory. | Kestra flow/DAG YAML, dbt project and model YAML/SQL, PySpark jobs, and ignored MLflow runtime data. |
 | `src/res/config` | Runtime configuration consumed by containers or external services. | Kestra server settings, dbt connection profile, Spark settings, and Snowflake initialization scripts. |
 | `src/res/data` | Local input data supplied outside Git. | Tianchi archives are placed in `data/raw`; it is mounted read-only. |
 | `src/res/docker` | Image build recipes and associated artifacts, not application source. | Supplied dbt-ui Dockerfiles, the pset Spark image recipe, and the dbt-ui Nginx proxy configuration. |
@@ -42,13 +42,16 @@ Nginx dbt-ui browser service ───────┘          │
 src/main/python/spark/jobs ──bind mount──────────┘
           │
           └──► Spark local[*] for notebooks, EDA, and connector smoke tests
+                         │ HTTP tracking
+                         ▼
+                    MLflow server ◄──bind mount── src/main/mlflow
 ```
 
 All Compose services use the private bridge network
 `ciencia-de-datos-data-platform-pset-2`. Services resolve each other through
 their service names; no container-to-container IP address is hard-coded.
 All published host ports (Kestra UI and management, dbt-ui, PostgreSQL, Spark UI,
-and Jupyter) are explicitly bound to `127.0.0.1`, not all host interfaces.
+Jupyter, and MLflow) are explicitly bound to `127.0.0.1`, not all host interfaces.
 
 Run every Compose command below from the pset directory with
 `--env-file src/res/env/.env`: Compose does not automatically discover this
@@ -59,7 +62,7 @@ resolved credentials.
 
 | File | Technical role | Relationships |
 | --- | --- | --- |
-| `docker-compose.yml` | Defines the `kestra-postgres`, `kestra`, `dbt-ui-backend`, `dbt-ui`, `spark`, and `snowpark-connect` services; health checks; network; bind mounts; and named volumes. | It is the sole place that connects `src/main` code and `src/res` resources to container paths. It reads values from `src/res/env/.env` and builds Dockerfiles in `src/res/docker/custom-images`. |
+| `docker-compose.yml` | Defines the `kestra-postgres`, `kestra`, `dbt-ui-backend`, `dbt-ui`, `spark`, `mlflow`, and `snowpark-connect` services; health checks; network; bind mounts; and named volumes. | It connects `src/main` code and runtime state, and `src/res` resources, to container paths. It reads values from `src/res/env/.env` and builds Dockerfiles in `src/res/docker/custom-images`. |
 | `src/res/env/.env.example` | Safe template for ports, local PostgreSQL credentials, Spark resource limits, dbt threads, and Snowflake variables. | Copy to `src/res/env/.env` and pass it explicitly with `--env-file` for Compose interpolation. The actual file is ignored. Supply private Snowflake credentials and retain the database/schema contract required by the unmodified flow and bootstrap. |
 | `../../../../.gitignore` | Prevents secrets, local data archives, dbt generated artifacts, bytecode, and private keys from being committed. | Preserves `.gitkeep` so empty required mount directories exist after clone. |
 | `README.md` | Operator-oriented quick start, validation commands, ports, and stop/reset instructions. | Links here for the deeper implementation rationale. |
@@ -151,7 +154,7 @@ exactly `apache/spark:4.0.4-scala2.13-java21-python3-r-ubuntu`. The tag provides
 Spark 4.0.4, Scala 2.13, Java 21, Python 3, and R. The custom layer adds the
 Scala 2.13 Snowflake connector `3.2.2-spark_4.0` and JDBC driver `4.0.2` to
 `/opt/spark/jars`. The Python layer adds JupyterLab, ipykernel, pandas, PyArrow,
-Matplotlib, and Seaborn from the pinned requirements manifest.
+Matplotlib, Seaborn, scikit-learn, and MLflow 2.17.2 from the requirements manifest.
 
 | Host resource/code | Container path | Technical effect |
 | --- | --- | --- |
@@ -168,6 +171,17 @@ warehouse named by `SNOWFLAKE_WAREHOUSE`. Operations supported by connector
 pushdown execute in Snowflake; arbitrary PySpark transformations still execute
 in the local container. Secrets are read only from process environment values
 and are neither embedded in notebooks nor printed by the helper.
+
+### `mlflow`
+
+The pinned `ghcr.io/mlflow/mlflow:v2.17.2` service runs the tracking UI and API
+on container port 5000. It stores experiment metadata and the model registry
+in `/mlflow/mlflow.db` (SQLite) and proxies artifact uploads to
+`/mlflow/artifacts`. Both paths are backed by the host bind mount
+`src/main/mlflow`, whose generated contents are ignored by Git. The host UI is
+loopback-only at `127.0.0.1:${MLFLOW_PORT:-5000}`. The Spark container uses
+`MLFLOW_TRACKING_URI=http://mlflow:5000` and waits for the server health check;
+notebooks should use this URI rather than opening a separate SQLite database.
 
 ### `snowpark-connect`
 
