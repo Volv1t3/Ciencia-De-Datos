@@ -6,6 +6,8 @@
 # y ese archivo se versiona. Los notebooks registran además las versiones en cada corrida.
 
 mlflow==3.1.1               # cliente; igual a la versión del servidor (docker/Dockerfile.mlflow)
+sqlalchemy==2.0.41          # 2.1 rompe MLflow 3.1.x (mismo pin que el servidor)
+alembic==1.16.2
 optuna>=4.3,<5
 torch>=2.6,<3               # MLP (si la imagen ya trae una build con CUDA, pip la respeta)
 skorch>=1.1,<2              # envoltorio sklearn para la MLP de PyTorch
