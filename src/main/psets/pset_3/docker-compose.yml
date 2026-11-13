@@ -38,7 +38,6 @@ services:
       --backend-store-uri postgresql+psycopg2://${MLFLOW_POSTGRES_USER}:${MLFLOW_POSTGRES_PASSWORD}@mlflow-postgres:5432/${MLFLOW_POSTGRES_DB}
       --artifacts-destination /mlartifacts
       --serve-artifacts
-      --allowed-hosts "localhost:*,127.0.0.1:*,mlflow:*"
     volumes:
       - mlflow_artifacts:/mlartifacts
     ports:
