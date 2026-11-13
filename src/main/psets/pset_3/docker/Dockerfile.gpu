@@ -1,0 +1,16 @@
+# Entorno de entrenamiento en GPU.
+# La imagen de RAPIDS trae CUDA, cuDF, cuML, XGBoost con CUDA, JupyterLab y scikit-learn.
+# Verificar en https://hub.docker.com/r/rapidsai/notebooks que la etiqueta exista y sea
+# compatible con el driver del H200 (`nvidia-smi` -> "CUDA Version" >= la de la imagen).
+ARG RAPIDS_IMAGE=rapidsai/notebooks:25.06-cuda12.8-py3.12
+FROM ${RAPIDS_IMAGE}
+
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*
+# El repo se monta con otro dueño: sin esto, `git rev-parse` falla dentro del contenedor.
+RUN git config --system --add safe.directory '*'
+
+COPY requirements.txt /tmp/requirements.txt
+RUN pip install --no-cache-dir -r /tmp/requirements.txt
+
+USER rapids

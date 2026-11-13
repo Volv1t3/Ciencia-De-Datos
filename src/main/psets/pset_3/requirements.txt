@@ -1,0 +1,20 @@
+# Paquetes que se instalan SOBRE la imagen de RAPIDS (docker/Dockerfile.gpu).
+# cuDF, cuML, XGBoost (CUDA), scikit-learn, pandas, numpy, pyarrow y JupyterLab vienen en la imagen.
+#
+# Reproducibilidad: después del primer build en el H200 se congela el entorno exacto con
+#   docker compose exec jupyter-gpu pip freeze > requirements.lock.txt
+# y ese archivo se versiona. Los notebooks registran además las versiones en cada corrida.
+
+mlflow==3.1.1               # cliente; igual a la versión del servidor (docker/Dockerfile.mlflow)
+optuna>=4.3,<5
+torch>=2.6,<3               # MLP (si la imagen ya trae una build con CUDA, pip la respeta)
+skorch>=1.1,<2              # envoltorio sklearn para la MLP de PyTorch
+tabpfn>=2.0,<3              # modelo fundacional tabular (familia "state of the art")
+anthropic>=0.50             # LLM por prompting (Claude API)
+snowflake-connector-python[pandas]>=3.12,<4
+shap>=0.46,<1
+python-dotenv>=1.0,<2
+matplotlib>=3.9,<4
+seaborn>=0.13,<1
+scipy>=1.13,<2
+pytest>=8,<9

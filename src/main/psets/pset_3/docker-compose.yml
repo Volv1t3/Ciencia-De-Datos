@@ -1,0 +1,89 @@
+# PSet #3 — tracking de experimentos y entorno de entrenamiento en GPU (servidor H200).
+# Uso (desde pset_3/):  docker compose up -d --build
+# Los puertos se publican solo en 127.0.0.1: el equipo entra por túnel SSH (ver README).
+
+# Nombre propio: el H200 es compartido y hay otros proyectos de compose.
+name: fteran-pset3
+
+services:
+  # Backend store de MLflow: experimentos, corridas, parámetros, métricas y Model Registry.
+  mlflow-postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${MLFLOW_POSTGRES_DB:?set MLFLOW_POSTGRES_DB in .env}
+      POSTGRES_USER: ${MLFLOW_POSTGRES_USER:?set MLFLOW_POSTGRES_USER in .env}
+      POSTGRES_PASSWORD: ${MLFLOW_POSTGRES_PASSWORD:?set MLFLOW_POSTGRES_PASSWORD in .env}
+    volumes:
+      - mlflow_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # Servidor de tracking. Artifact store = volumen local servido por el propio servidor
+  # (--serve-artifacts): los clientes suben modelos por HTTP, sin acceso directo al disco.
+  mlflow:
+    build:
+      context: docker
+      dockerfile: Dockerfile.mlflow
+    restart: unless-stopped
+    depends_on:
+      mlflow-postgres:
+        condition: service_healthy
+    command: >
+      mlflow server
+      --host 0.0.0.0 --port 5000
+      --backend-store-uri postgresql+psycopg2://${MLFLOW_POSTGRES_USER}:${MLFLOW_POSTGRES_PASSWORD}@mlflow-postgres:5432/${MLFLOW_POSTGRES_DB}
+      --artifacts-destination /mlartifacts
+      --serve-artifacts
+      --allowed-hosts "localhost:*,127.0.0.1:*,mlflow:*"
+    volumes:
+      - mlflow_artifacts:/mlartifacts
+    ports:
+      - "127.0.0.1:${MLFLOW_PORT:-5050}:5000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+
+  # Entorno de entrenamiento: RAPIDS (cuDF, cuML, XGBoost CUDA) + requirements.txt.
+  # Monta el repositorio completo para que el tag git_commit de cada corrida sea real.
+  jupyter-gpu:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.gpu
+    restart: unless-stopped
+    depends_on:
+      mlflow:
+        condition: service_healthy
+    env_file: .env
+    environment:
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      DATOS_DIR: /datos
+      PYTHONHASHSEED: "0"
+    working_dir: /repo/src/main/psets/pset_3
+    volumes:
+      - ../../../..:/repo
+      - ${DATOS_DIR_HOST:?set DATOS_DIR_HOST in .env}:/datos
+    shm_size: 64gb
+    ports:
+      - "127.0.0.1:${JUPYTER_PORT:-8888}:8888"
+    command: >
+      jupyter lab --ip=0.0.0.0 --port=8888 --no-browser
+      --ServerApp.token=${JUPYTER_TOKEN:?set JUPYTER_TOKEN in .env}
+      --ServerApp.root_dir=/repo/src/main/psets/pset_3
+    deploy:
+      resources:
+        reservations:
+          devices:
+            # Servidor compartido: solo las GPUs acordadas (dentro del contenedor se ven como 0 y 1).
+            - driver: nvidia
+              device_ids: ["${GPU_IDS_0:-0}", "${GPU_IDS_1:-1}"]
+              capabilities: [gpu]
+
+volumes:
+  mlflow_postgres_data:
+  mlflow_artifacts:
