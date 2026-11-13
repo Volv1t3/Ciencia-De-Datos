@@ -4,6 +4,10 @@ FROM python:3.12-slim
 
 ARG MLFLOW_VERSION=3.1.1
 # SQLAlchemy 2.1 eliminó FallbackAsyncAdaptedQueuePool, que MLflow 3.1.x importa: se fija la serie 2.0.
-RUN pip install --no-cache-dir "mlflow==${MLFLOW_VERSION}" "psycopg2-binary==2.9.10" \n    "sqlalchemy==2.0.41" "alembic==1.16.2"
+RUN pip install --no-cache-dir \
+    "mlflow==${MLFLOW_VERSION}" \
+    "psycopg2-binary==2.9.10" \
+    "sqlalchemy==2.0.41" \
+    "alembic==1.16.2"
 
 EXPOSE 5000
