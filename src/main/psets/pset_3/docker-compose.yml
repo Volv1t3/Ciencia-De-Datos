@@ -59,10 +59,18 @@ services:
       mlflow:
         condition: service_healthy
     env_file: .env
+    # Se corre con el uid del dueño del repo (para guardar notebooks y leer .env) y el grupo
+    # `conda` de la imagen RAPIDS (gid 1001), que es el único con acceso a /opt/conda.
+    user: "${HOST_UID:?set HOST_UID in .env (id -u)}:1001"
     environment:
       MLFLOW_TRACKING_URI: http://mlflow:5000
       DATOS_DIR: /datos
       PYTHONHASHSEED: "0"
+      HOME: /tmp/home
+      # torch (pip) trae NCCL 2.30 y RAPIDS (conda) NCCL 2.27. Si cuML se importa antes que
+      # torch, se carga la 2.27 y torch falla (undefined symbol ncclCommResume). Precargar la
+      # 2.30, compatible hacia atrás, hace que el orden de imports no importe.
+      LD_PRELOAD: /opt/conda/lib/python3.12/site-packages/nvidia/nccl/lib/libnccl.so.2
     working_dir: /repo/src/main/psets/pset_3
     volumes:
       - ../../../..:/repo
