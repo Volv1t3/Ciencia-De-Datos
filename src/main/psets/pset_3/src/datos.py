@@ -241,7 +241,9 @@ def hash_snapshot(directorio: str | Path) -> tuple[str, dict[str, str]]:
 
 def escribir_manifiesto(directorio: Path, *, tabla: str, sql: str, extraido_en: str) -> dict:
     hash_global, por_archivo = hash_snapshot(directorio)
-    meta = pd.read_parquet(directorio, columns=list(COLUMNAS_META))
+    import pyarrow.dataset as ds
+    meta = ds.dataset([str(p) for p in archivos_snapshot(directorio)], format="parquet"
+                      ).to_table(columns=list(COLUMNAS_META)).to_pandas()
     eventos = meta.loc[meta["TARGET_30D"] == 1, "SSD_KEY"].nunique()
     manifiesto = {
         "tabla_origen": tabla,
@@ -276,9 +278,21 @@ def metadatos_dataset(directorio: str | Path) -> dict[str, str]:
     }
 
 
+def archivos_snapshot(directorio: str | Path) -> list[Path]:
+    """Los Parquet del snapshot (la carpeta también tiene manifiesto.json y extraccion.sql)."""
+    return sorted(Path(directorio).rglob("*.parquet"))
+
+
 def cargar_dataset(directorio: str | Path, columnas: list[str] | None = None,
-                   verificar_hash: bool = True) -> pd.DataFrame:
-    """Lee el snapshot. Features en float32 (la mitad de memoria); verifica el hash por defecto."""
+                   verificar_hash: bool = True, desde: date | None = None,
+                   hasta: date | None = None) -> pd.DataFrame:
+    """Lee el snapshot. Features en float32 (la mitad de memoria); verifica el hash por defecto.
+
+    `desde`/`hasta` (inclusive) filtran por OBSERVATION_DATE al leer, sin cargar el resto.
+    """
+    import pyarrow.compute as pc
+    import pyarrow.dataset as ds
+
     base = Path(directorio)
     if verificar_hash:
         esperado = leer_manifiesto(base)["dataset_sha256"]
@@ -287,13 +301,23 @@ def cargar_dataset(directorio: str | Path, columnas: list[str] | None = None,
             raise ValueError(f"El snapshot cambió: hash {obtenido} != manifiesto {esperado}")
     if columnas is not None:
         columnas = list(dict.fromkeys(list(COLUMNAS_META) + list(columnas)))
-    df = pd.read_parquet(base, columns=columnas)
-    df = df.drop(columns=[c for c in ("mes",) if c in df.columns])
+    dataset = ds.dataset([str(p) for p in archivos_snapshot(base)], format="parquet")
+    filtro = None
+    for limite, op in ((desde, pc.greater_equal), (hasta, pc.less_equal)):
+        if limite is not None:
+            f = op(ds.field("OBSERVATION_DATE"), pa_fecha(limite))
+            filtro = f if filtro is None else filtro & f
+    df = dataset.to_table(columns=columnas, filter=filtro).to_pandas()
     df["OBSERVATION_DATE"] = pd.to_datetime(df["OBSERVATION_DATE"])
     feats = [c for c in df.columns if c not in COLUMNAS_META and c != "SSD_KEY"]
     df[feats] = df[feats].astype(np.float32)
     df["TARGET_30D"] = df["TARGET_30D"].astype(np.int8)
     return df.sort_values(["OBSERVATION_DATE", "SSD_KEY"], kind="stable").reset_index(drop=True)
+
+
+def pa_fecha(d: date):
+    import pyarrow as pa
+    return pa.scalar(d, type=pa.date32())
 
 
 # --------------------------------------------------------------------------------------------

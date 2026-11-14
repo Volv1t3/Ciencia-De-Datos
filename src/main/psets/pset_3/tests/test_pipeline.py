@@ -161,6 +161,20 @@ def test_hash_snapshot_estable(tmp_path):
     assert datos.hash_snapshot(tmp_path)[0] != h1
 
 
+def test_cargar_dataset_ignora_no_parquet_y_filtra_fechas(tmp_path):
+    pytest.importorskip("pyarrow")
+    for mes, fechas in (("2019-09", ["2019-09-29", "2019-09-30"]), ("2019-11", ["2019-11-02"])):
+        (tmp_path / f"mes={mes}").mkdir()
+        pd.DataFrame({"SSD_KEY": ["a"] * len(fechas), "OBSERVATION_DATE": pd.to_datetime(fechas).date,
+                      "DAYS_TO_FAILURE": np.nan, "TARGET_30D": 0.0, "R_5": 1.0}
+                     ).to_parquet(tmp_path / f"mes={mes}" / "d.parquet")
+    datos.escribir_manifiesto(tmp_path, tabla="T", sql="select 1", extraido_en="hoy")
+    todo = datos.cargar_dataset(tmp_path)
+    assert len(todo) == 3 and todo["R_5"].dtype == np.float32
+    train = datos.cargar_dataset(tmp_path, ["R_5"], hasta=datos.FIN_ENTRENAMIENTO)
+    assert train["OBSERVATION_DATE"].max() == pd.Timestamp("2019-09-30") and len(train) == 2
+
+
 # ------------------------------------------------------------------ CV de punta a punta
 @pytest.mark.parametrize("familia", ["dummy", "regla", "sin_temporales", "logistica"])
 def test_evaluar_cv_familias_cpu(df, familia):
