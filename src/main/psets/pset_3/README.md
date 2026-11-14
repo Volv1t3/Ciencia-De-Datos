@@ -13,7 +13,7 @@ OBT (Snowflake) → snapshot Parquet → EDA → features → Pipeline → basel
 |---|---|
 | Unidad | SSD-día (`SSD_KEY`, `OBSERVATION_DATE`) del modelo MC1 |
 | Target | `TARGET_30D`: falla entre 1 y 30 días después, con seguimiento completo |
-| Episodio de alerta | Uno por disco: la primera fecha con score ≥ τ. Es **acierto** si el disco falla entre **7 y 30 días** después |
+| Episodio de alerta | Empieza el primer día con score ≥ τ y dura 30 días (el disco no vuelve a alertar mientras dura). Es **acierto** si el disco falla entre **7 y 30 días** después de su inicio. Al terminar, el disco puede abrir otro episodio. La lectura literal "un solo episodio por disco" se reporta como sensibilidad (ver notebook 01, sección 7) |
 | Métrica técnica | **PR-AUC por evento** (selección, CV y tuning) y **F0,5 por evento** (operación). El recall se cuenta sobre discos que fallan, no sobre filas |
 | Baselines | Dummy · regla de umbral sobre el mejor atributo SMART · modelo sin features temporales |
 | Métrica de negocio | Costo esperado por 1.000 SSD-mes con C_FP = 1 y C_FN = k, para k ∈ [1, 50], y el k de equilibrio frente a la regla |

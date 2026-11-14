@@ -3,8 +3,13 @@
 Los notebooks importan este módulo; no copian su lógica.
 
 Definiciones comprometidas en el PSet #1 (memo Perla_Guaman_Teran_Arellano, sección 3.1):
-- Un *episodio de alerta* por disco: la primera fecha con score >= tau.
-- Acierto: el disco falla entre 7 y 30 días después de esa fecha (DAYS_TO_FAILURE en [7, 30]).
+- *Episodio de alerta*: empieza el primer día con score >= tau y dura EPISODIO_DIAS (30) días,
+  durante los cuales el disco no vuelve a alertar. Al terminar, el disco puede abrir otro
+  episodio (en operación la alerta es un ticket: se revisa el disco y vuelve a servicio).
+  La lectura literal "una sola alerta por disco en todo el historial" (episodio_dias=None) se
+  reporta como sensibilidad: en la EDA (01) ~90 % de los discos bien detectados quedaban como
+  error porque su primera alerta llegaba meses antes de la falla.
+- Acierto: el disco falla entre 7 y 30 días después del inicio del episodio (DAYS_TO_FAILURE en [7, 30]).
 - Recall sobre eventos (discos que fallan), nunca sobre filas.
 - Selección por PR-AUC por evento; operación por F0,5 por evento.
 - Negocio: costo esperado por 1.000 SSD-mes, C_FP = 1 y C_FN = k, para k en [1, 50].
@@ -305,24 +310,9 @@ class EmbargoTimeSeriesSplit:
 # Métricas por evento (PSet #1)
 # --------------------------------------------------------------------------------------------
 ANTICIPACION_MIN, ANTICIPACION_MAX = 7, 30
-
-
-def _registros_por_disco(ssd, fecha, dias, score) -> pd.DataFrame:
-    """Filas donde el máximo acumulado del score de cada disco sube (orden por fecha).
-
-    Para un umbral tau, la alerta de un disco es la primera fila con score >= tau; esa fila es
-    siempre uno de estos "récords": el k-ésimo récord es la alerta para tau en (s_{k-1}, s_k].
-    Así la curva PR por evento se calcula de forma exacta en O(n log n).
-    """
-    d = pd.DataFrame({"ssd": np.asarray(ssd), "fecha": pd.to_datetime(np.asarray(fecha)),
-                      "dias": np.asarray(dias, dtype=float), "score": np.asarray(score, dtype=float)})
-    d = d.sort_values(["ssd", "fecha"], kind="stable")
-    maximo = d.groupby("ssd", sort=False)["score"].cummax()
-    previo = maximo.groupby(d["ssd"], sort=False).shift(1)
-    rec = d[previo.isna() | (d["score"] > previo)].copy()
-    rec["previo"] = previo[rec.index].fillna(-np.inf)
-    rec["acierto"] = rec["dias"].between(ANTICIPACION_MIN, ANTICIPACION_MAX)
-    return rec
+EPISODIO_DIAS = 30          # duración de un episodio de alerta (= horizonte del target)
+N_UMBRALES = 400            # umbrales de la curva PR por evento (espaciados en log del rango)
+_SIN_REPETICION = 1 << 40   # episodio_dias=None: un solo episodio por disco en todo el historial
 
 
 def eventos_anticipables(ssd, dias) -> int:
@@ -332,21 +322,103 @@ def eventos_anticipables(ssd, dias) -> int:
 
 
 @dataclass
+class EventosPreparados:
+    """Filas ordenadas por (disco, fecha), listas para el conteo de episodios.
+
+    Ordenar es lo caro; se hace una vez y se reutiliza para muchos scores (EDA, CV).
+    """
+    orden: np.ndarray       # posiciones originales en orden (disco, fecha)
+    inicio: np.ndarray      # inicio de cada disco dentro del orden (+ n al final)
+    fecha: np.ndarray       # días (int64), ya ordenados
+    dias: np.ndarray        # DAYS_TO_FAILURE (float64, NaN si no falla), ya ordenados
+    eventos: int
+
+
+def preparar_eventos(ssd, fecha, dias) -> EventosPreparados:
+    codigos = pd.factorize(np.asarray(ssd))[0]
+    f = np.asarray(pd.to_datetime(np.asarray(fecha)), dtype="datetime64[D]").astype(np.int64)
+    orden = np.lexsort((f, codigos))
+    c = codigos[orden]
+    inicio = np.concatenate([[0], np.flatnonzero(np.diff(c)) + 1, [len(c)]]).astype(np.int64)
+    d = np.asarray(dias, dtype=np.float64)
+    return EventosPreparados(orden, inicio, f[orden], d[orden], eventos_anticipables(ssd, dias))
+
+
+try:
+    from numba import njit, prange
+except ImportError:  # pragma: no cover - numba viene con RAPIDS y en requirements
+    raise ImportError("Las métricas por evento necesitan numba (pip install numba)")
+
+
+@njit(parallel=True, cache=True)
+def _contar_episodios(inicio, fecha, dias, score, umbrales, duracion, a_min, a_max):
+    """Para cada umbral: episodios abiertos, aciertos y alertas tardías (1-6 días)."""
+    t_n = len(umbrales)
+    alertas = np.zeros(t_n, np.int64)
+    aciertos = np.zeros(t_n, np.int64)
+    tardias = np.zeros(t_n, np.int64)
+    for k in prange(t_n):
+        tau = umbrales[k]
+        a = 0
+        h = 0
+        tl = 0
+        for d in range(len(inicio) - 1):
+            libre_desde = -(1 << 62)
+            for i in range(inicio[d], inicio[d + 1]):
+                if score[i] >= tau and fecha[i] >= libre_desde:
+                    a += 1
+                    x = dias[i]
+                    if x >= a_min and x <= a_max:
+                        h += 1
+                    elif x >= 1 and x < a_min:
+                        tl += 1
+                    libre_desde = fecha[i] + duracion
+        alertas[k] = a
+        aciertos[k] = h
+        tardias[k] = tl
+    return alertas, aciertos, tardias
+
+
+def _contar(prep: EventosPreparados, score, umbrales, episodio_dias):
+    s = np.asarray(score, dtype=np.float64)[prep.orden]
+    s = np.where(np.isnan(s), -np.inf, s)  # sin score -> nunca alerta
+    duracion = _SIN_REPETICION if episodio_dias is None else int(episodio_dias)
+    return _contar_episodios(prep.inicio, prep.fecha, prep.dias, s,
+                             np.asarray(umbrales, dtype=np.float64), duracion,
+                             ANTICIPACION_MIN, ANTICIPACION_MAX)
+
+
+def _umbrales(score, n: int) -> np.ndarray:
+    """Umbrales descendentes en los rangos 1, ~e^(1/n·ln N), ..., N del score (log-espaciados).
+
+    La parte útil de la curva (pocas alertas, alta precisión) está en la cola alta del score;
+    espaciar en log del rango da resolución ahí sin evaluar millones de umbrales.
+    """
+    s = np.asarray(score, dtype=np.float64)
+    s = s[np.isfinite(s)]
+    if len(s) == 0:
+        return np.array([])
+    rangos = np.unique(np.round(np.logspace(0, np.log10(len(s)), n)).astype(np.int64) - 1)
+    valores = -np.partition(-s, rangos)[rangos]
+    return np.unique(valores)[::-1]
+
+
+@dataclass
 class CurvaEvento:
     umbrales: np.ndarray  # descendentes
-    alertas: np.ndarray
-    aciertos: np.ndarray
+    alertas: np.ndarray   # episodios abiertos
+    aciertos: np.ndarray  # episodios que anticipan la falla 7-30 días
     eventos: int
     pr_auc: float = field(init=False)
 
     def __post_init__(self):
         """PR-AUC con precisión interpolada (estilo PASCAL VOC).
 
-        Con la regla "primera fecha con score >= tau", el recall por evento NO es monótono en
-        tau: al bajar el umbral la alerta de un disco puede adelantarse a más de 30 días de su
-        falla y dejar de ser acierto. Por eso no se usa la suma de Riemann de sklearn (daría
-        incrementos negativos): se ordenan los puntos por recall y se usa, en cada nivel, la
-        mejor precisión alcanzable con un recall igual o mayor.
+        Con episodios, el recall por evento NO es monótono en tau: al bajar el umbral un
+        episodio puede adelantarse a más de 30 días de la falla y su silencio de 30 días tapar
+        la alerta que sí habría acertado. Por eso no se usa la suma de Riemann de sklearn
+        (daría incrementos negativos): se ordenan los puntos por recall y se usa, en cada
+        nivel, la mejor precisión alcanzable con un recall igual o mayor.
         """
         if not self.eventos or len(self.umbrales) == 0:
             self.pr_auc = float("nan")
@@ -366,37 +438,32 @@ class CurvaEvento:
         return self.aciertos / self.eventos if self.eventos else np.zeros(len(self.aciertos))
 
 
-def curva_evento(ssd, fecha, dias, score) -> CurvaEvento:
-    """Curva precisión-recall por evento, exacta en todos los umbrales relevantes."""
-    rec = _registros_por_disco(ssd, fecha, dias, score)
-    umbrales = np.unique(rec["score"].to_numpy())[::-1]
-    s = np.sort(rec["score"].to_numpy())
-    p = np.sort(rec["previo"].to_numpy())
-    s_ac = np.sort(rec.loc[rec["acierto"], "score"].to_numpy())
-    p_ac = np.sort(rec.loc[rec["acierto"], "previo"].to_numpy())
+def curva_evento(ssd, fecha, dias, score, episodio_dias: int | None = EPISODIO_DIAS,
+                 n_umbrales: int = N_UMBRALES, prep: EventosPreparados | None = None) -> CurvaEvento:
+    """Curva precisión-recall por evento en `n_umbrales` umbrales log-espaciados en rango.
 
-    def contar_mayor_igual(arr, t):
-        return len(arr) - np.searchsorted(arr, t, side="left")
-
-    # Récords activos en t: s_k >= t y previo_k < t  ==  #(s>=t) - #(previo>=t)
-    alertas = contar_mayor_igual(s, umbrales) - contar_mayor_igual(p, umbrales)
-    aciertos = contar_mayor_igual(s_ac, umbrales) - contar_mayor_igual(p_ac, umbrales)
-    return CurvaEvento(umbrales, alertas, aciertos, eventos_anticipables(ssd, dias))
+    `prep` (de `preparar_eventos`) evita reordenar cuando se evalúan muchos scores sobre las
+    mismas filas; en ese caso ssd/fecha/dias se ignoran.
+    """
+    prep = prep or preparar_eventos(ssd, fecha, dias)
+    umbrales = _umbrales(score, n_umbrales)
+    alertas, aciertos, _ = _contar(prep, score, umbrales, episodio_dias)
+    return CurvaEvento(umbrales, alertas, aciertos, prep.eventos)
 
 
-def metricas_evento(ssd, fecha, dias, score, tau: float, beta: float = 0.5) -> dict:
+def metricas_evento(ssd, fecha, dias, score, tau: float, beta: float = 0.5,
+                    episodio_dias: int | None = EPISODIO_DIAS,
+                    prep: EventosPreparados | None = None) -> dict:
     """Precisión, recall y F-beta por evento en un umbral tau (operación)."""
-    rec = _registros_por_disco(ssd, fecha, dias, score)
-    alerta = rec[(rec["score"] >= tau) & (rec["previo"] < tau)]
-    tp, n_alertas = int(alerta["acierto"].sum()), len(alerta)
-    eventos = eventos_anticipables(ssd, dias)
+    prep = prep or preparar_eventos(ssd, fecha, dias)
+    a, h, tl = _contar(prep, score, [tau], episodio_dias)
+    n_alertas, tp, eventos = int(a[0]), int(h[0]), prep.eventos
     precision = tp / n_alertas if n_alertas else 0.0
     recall = tp / eventos if eventos else 0.0
     b2 = beta ** 2
     f = (1 + b2) * precision * recall / (b2 * precision + recall) if precision + recall else 0.0
     return {"precision_evento": precision, "recall_evento": recall, "f05_evento": f,
-            "alertas": n_alertas, "aciertos": tp, "eventos": eventos,
-            "alertas_tardias": int(alerta["dias"].between(1, ANTICIPACION_MIN - 1).sum())}
+            "alertas": n_alertas, "aciertos": tp, "eventos": eventos, "alertas_tardias": int(tl[0])}
 
 
 # --------------------------------------------------------------------------------------------
@@ -434,9 +501,10 @@ def barrer_k(curva: CurvaEvento, exposicion_ssd_mes: float, ks=range(1, 51)) -> 
 def costo_con_tau(ssd, fecha, dias, score, taus_por_k: pd.DataFrame) -> pd.DataFrame:
     """Aplica en otro conjunto (prueba) los tau elegidos en CV; nunca se re-optimizan."""
     exp = ssd_meses(ssd, fecha)
+    prep = preparar_eventos(ssd, fecha, dias)
     filas = []
     for _, fila in taus_por_k.iterrows():
-        m = metricas_evento(ssd, fecha, dias, score, fila["tau"])
+        m = metricas_evento(ssd, fecha, dias, score, fila["tau"], prep=prep)
         filas.append({"k": fila["k"], "tau": fila["tau"], **m,
                       "costo": float(costo_por_1000(m["alertas"], m["aciertos"], m["eventos"], exp, fila["k"])),
                       "costo_sin_modelo": 1000.0 * fila["k"] * m["eventos"] / exp})

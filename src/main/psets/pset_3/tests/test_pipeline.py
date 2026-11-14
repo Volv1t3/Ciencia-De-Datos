@@ -63,28 +63,58 @@ def test_alerta_con_anticipacion_7_a_30_es_acierto():
     assert m["recall_evento"] == 1.0
 
 
-def test_solo_cuenta_la_primera_alerta():
-    # El disco alerta a 45 días de la falla (no acierto); la segunda alerta a 10 días no cuenta.
+def test_episodios_se_repiten_tras_30_dias():
+    # Alerta a 45 días de la falla (falsa alarma). A 10 días ya pasó el episodio de 30 días:
+    # se abre otro y acierta. Con la lectura literal (un episodio por disco) no hay segundo.
     fecha = pd.date_range("2019-01-01", periods=36)
     dias = np.arange(45, 9, -1)
     score = np.where((dias == 45) | (dias == 10), 0.9, 0.0)
     m = pl.metricas_evento(["A"] * 36, fecha, dias, score, tau=0.5)
-    assert m["alertas"] == 1 and m["aciertos"] == 0
+    assert m["alertas"] == 2 and m["aciertos"] == 1 and m["recall_evento"] == 1.0
+    literal = pl.metricas_evento(["A"] * 36, fecha, dias, score, tau=0.5, episodio_dias=None)
+    assert literal["alertas"] == 1 and literal["aciertos"] == 0
 
 
-def _curva_fuerza_bruta(d, tau):
-    alerta = d[d["score"] >= tau].sort_values("OBSERVATION_DATE").groupby("SSD_KEY").head(1)
-    return len(alerta), int(alerta["DAYS_TO_FAILURE"].between(7, 30).sum())
+def test_dentro_del_episodio_no_se_vuelve_a_alertar():
+    # Score alto todos los días: un episodio cada 30 días, no una alerta diaria.
+    fecha = pd.date_range("2019-01-01", periods=90)
+    m = pl.metricas_evento(["A"] * 90, fecha, [np.nan] * 90, np.ones(90), tau=0.5)
+    assert m["alertas"] == 3 and m["aciertos"] == 0 and m["eventos"] == 0
 
 
-def test_curva_evento_coincide_con_definicion_literal(df):
+def _fuerza_bruta(d, tau, episodio_dias):
+    alertas = aciertos = 0
+    for _, g in d.sort_values("OBSERVATION_DATE").groupby("SSD_KEY"):
+        libre = pd.Timestamp.min
+        for f, x, s in zip(g["OBSERVATION_DATE"], g["DAYS_TO_FAILURE"], g["score"]):
+            if s >= tau and f >= libre:
+                alertas += 1
+                aciertos += int(7 <= x <= 30)
+                libre = pd.Timestamp.max if episodio_dias is None else f + pd.Timedelta(days=episodio_dias)
+    return alertas, aciertos
+
+
+@pytest.mark.parametrize("episodio_dias", [30, None])
+def test_curva_evento_coincide_con_fuerza_bruta(df, episodio_dias):
     rng = np.random.default_rng(1)
-    d = df.assign(score=np.round(rng.random(len(df)) * 0.3 + df["R_5"] / 50, 2))
-    curva = pl.curva_evento(d["SSD_KEY"], d["OBSERVATION_DATE"], d["DAYS_TO_FAILURE"], d["score"])
-    for i in rng.choice(len(curva.umbrales), 25, replace=False):
-        alertas, aciertos = _curva_fuerza_bruta(d, curva.umbrales[i])
+    d = df[df["SSD_KEY"].isin([f"d{i}" for i in range(120)])]
+    d = d.assign(score=np.round(rng.random(len(d)) * 0.3 + d["R_5"] / 50, 2))
+    curva = pl.curva_evento(d["SSD_KEY"], d["OBSERVATION_DATE"], d["DAYS_TO_FAILURE"], d["score"],
+                            episodio_dias=episodio_dias)
+    for i in rng.choice(len(curva.umbrales), 12, replace=False):
+        alertas, aciertos = _fuerza_bruta(d, curva.umbrales[i], episodio_dias)
         assert curva.alertas[i] == alertas and curva.aciertos[i] == aciertos
     assert 0 <= curva.pr_auc <= 1
+
+
+def test_prep_reutilizable_y_orden_de_filas_irrelevante(df):
+    s = df["R_5"].to_numpy()
+    prep = pl.preparar_eventos(df["SSD_KEY"], df["OBSERVATION_DATE"], df["DAYS_TO_FAILURE"])
+    a = pl.curva_evento(None, None, None, s, prep=prep).pr_auc
+    p = np.random.default_rng(3).permutation(len(df))
+    d2 = df.iloc[p]
+    b = pl.curva_evento(d2["SSD_KEY"], d2["OBSERVATION_DATE"], d2["DAYS_TO_FAILURE"], s[p]).pr_auc
+    assert a == pytest.approx(b)
 
 
 def test_pr_auc_score_perfecto_y_aleatorio(df):
