@@ -1,7 +1,7 @@
 """Extracción de la OBT MC1 desde Snowflake, snapshot versionado y partición temporal.
 
 Flujo:
-    extraer_obt()      Snowflake --COPY INTO--> stage de usuario (Parquet por mes) --GET--> disco local
+    extraer_obt()      Snowflake --COPY INTO--> stage de usuario (Parquet por mes) --GET por mes--> disco local
     escribir_manifiesto()  SHA-256 de cada archivo + hash global del snapshot + conteos
     cargar_dataset()   lee el snapshot, verifica el hash y devuelve un DataFrame float32
     split_holdout()    entrenamiento/CV | embargo | prueba (particiones acordadas por el equipo)
@@ -152,12 +152,20 @@ WHERE "TARGET_30D" IS NOT NULL
 """.strip()
 
 
+def _filas_parquet(directorio: Path) -> int:
+    import pyarrow.parquet as pq
+    return sum(pq.ParquetFile(p).metadata.num_rows for p in directorio.rglob("*.parquet"))
+
+
 def extraer_obt(directorio: str | Path, cfg: ConfigSnowflake | None = None,
-                prefijo_stage: str = "pset3_obt") -> Path:
+                prefijo_stage: str = "pset3_obt", copiar: bool = True) -> Path:
     """Descarga la OBT a `directorio` como Parquet particionado por mes y escribe el manifiesto.
 
     Usa COPY INTO al stage de usuario (@~) y GET: es mucho más rápido y barato que traer
-    ~100M filas por cursor. El stage se limpia antes y después.
+    ~100M filas por cursor. GET aplana las carpetas del stage y los archivos de meses distintos
+    pueden llamarse igual, así que se baja cada partición `mes=AAAA-MM/` a su propia carpeta.
+    El stage solo se borra cuando las filas descargadas coinciden con las que reportó COPY INTO.
+    `copiar=False` reutiliza lo que ya está en el stage (reintento de una descarga fallida).
     """
     cfg = cfg or ConfigSnowflake.desde_entorno()
     destino = Path(directorio).resolve()
@@ -171,14 +179,34 @@ def extraer_obt(directorio: str | Path, cfg: ConfigSnowflake | None = None,
         columnas = columnas_features_obt(conn, cfg.tabla_obt)
         sql = sql_extraccion(cfg.tabla_obt, columnas)
         stage = f"@~/{prefijo_stage}/"
-        cur.execute(f"REMOVE {stage}")
-        cur.execute(
-            f"COPY INTO {stage} FROM ({sql}) "
-            "PARTITION BY ('mes=' || TO_VARCHAR(\"OBSERVATION_DATE\", 'YYYY-MM')) "
-            "FILE_FORMAT = (TYPE = PARQUET COMPRESSION = SNAPPY) "
-            "HEADER = TRUE MAX_FILE_SIZE = 268435456"
-        )
-        cur.execute(f"GET {stage} 'file://{destino.as_posix()}/' PARALLEL = 16")
+        if copiar:
+            cur.execute(f"REMOVE {stage}")
+            cur.execute(
+                f"COPY INTO {stage} FROM ({sql}) "
+                "PARTITION BY ('mes=' || TO_VARCHAR(\"OBSERVATION_DATE\", 'YYYY-MM')) "
+                "FILE_FORMAT = (TYPE = PARQUET COMPRESSION = SNAPPY) "
+                "HEADER = TRUE MAX_FILE_SIZE = 268435456"
+            )
+            print("COPY INTO:", cur.fetchall(), flush=True)
+
+        # LIST devuelve nombres como 'pset3_obt/mes=2018-01/data_....snappy.parquet'
+        archivos = [r[0] for r in cur.execute(f"LIST {stage}").fetchall()]
+        if not archivos:
+            raise RuntimeError(f"El stage {stage} está vacío")
+        particiones = sorted({a.split("/")[1] for a in archivos if a.count("/") >= 2})
+        print(f"{len(archivos)} archivos en {len(particiones)} particiones", flush=True)
+        for part in particiones:
+            sub = destino / part
+            sub.mkdir(exist_ok=True)
+            cur.execute(f"GET '{stage}{part}/' 'file://{sub.as_posix()}/' PARALLEL = 16")
+            print("GET", part, flush=True)
+
+        # Verificación: lo que se bajó == lo que se exportó (filas del SELECT de extracción).
+        esperadas = cur.execute(f"SELECT COUNT(*) FROM ({sql})").fetchone()[0]
+        bajadas = _filas_parquet(destino)
+        if bajadas != esperadas:
+            raise RuntimeError(f"Descarga incompleta: {bajadas} filas locales vs {esperadas} en Snowflake; "
+                               f"el stage se conserva para reintentar con copiar=False")
         cur.execute(f"REMOVE {stage}")
         cur.execute("SELECT CURRENT_TIMESTAMP()::STRING")
         extraido_en = cur.fetchone()[0]
