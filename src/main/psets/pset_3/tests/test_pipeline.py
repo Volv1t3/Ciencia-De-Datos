@@ -118,6 +118,63 @@ def test_fechas_como_dias_enteros_equivalen_a_datetime(df):
     assert b.alertas[-1] > lit.alertas[-1]
 
 
+def test_muestra_por_disco_conserva_fallas_y_discos_completos(df):
+    pos = pl.muestra_por_disco(df, frac_sanos=0.2, seed=7)
+    m = df.iloc[pos]
+    fallan = set(df.loc[df["TARGET_30D"] == 1, "SSD_KEY"])
+    assert fallan <= set(m["SSD_KEY"])                          # todas las fallas
+    por_disco = df.groupby("SSD_KEY").size()
+    vistos = m.groupby("SSD_KEY").size()
+    assert (vistos.to_numpy() == por_disco[vistos.index].to_numpy()).all()  # discos completos
+    sanos = set(df["SSD_KEY"]) - fallan
+    frac = len(set(m["SSD_KEY"]) - fallan) / len(sanos)
+    assert 0.1 < frac < 0.3
+    # determinista y estable si SSD_KEY es categórica
+    cat = df.assign(SSD_KEY=df["SSD_KEY"].astype("category"))
+    assert np.array_equal(pos, pl.muestra_por_disco(cat, 0.2, seed=7))
+
+
+def test_derivadas_numpy_igual_a_pandas(df):
+    cols = pl.columnas_modelo(df, "R")
+    a = pl.FeaturesDerivadas().fit(df[cols]).transform(df[cols])
+    b = pl.FeaturesDerivadas(salida="numpy").fit(df[cols]).transform(df[cols])
+    assert b.dtype == np.float32 and np.allclose(a.to_numpy(np.float32), b, equal_nan=True)
+
+
+def test_cv_con_submuestra_de_sanos_valida_con_todo(df):
+    cols = pl.columnas_modelo(df, "R")
+    sp = pl.EmbargoTimeSeriesSplit(n_splits=2, meses_validacion=2)
+    completo, _ = pl.evaluar_cv("logistica", df, cols, sp)
+    sub, _ = pl.evaluar_cv("logistica", df, cols, sp, frac_sanos_train=0.3)
+    assert len(sub.oof) == len(completo.oof)  # validación intacta
+    assert sub.resumen["cv_pr_auc_evento_media"] > 0
+
+
+def test_cache_coincide_con_cargar_dataset(tmp_path):
+    pytest.importorskip("polars")
+    snap = tmp_path / "snap"
+    filas = []
+    for mes, dias in (("2019-08", ["2019-08-30", "2019-08-31"]), ("2019-09", ["2019-09-01", "2019-09-30"])):
+        (snap / f"mes={mes}").mkdir(parents=True)
+        d = pd.DataFrame({"SSD_KEY": ["b", "a"] * len(dias), "OBSERVATION_DATE": pd.to_datetime(dias * 2).date,
+                          "DAYS_TO_FAILURE": [np.nan, 10.0] * len(dias), "TARGET_30D": [0.0, 1.0] * len(dias),
+                          "R_5": np.arange(2 * len(dias), dtype=float), "N_5": 1.0,
+                          "DAYS_SINCE_FIRST_SEEN": 3.0})
+        d.to_parquet(snap / f"mes={mes}" / "d.parquet")
+        filas.append(d)
+    datos.escribir_manifiesto(snap, tabla="T", sql="s", extraido_en="hoy")
+    datos.construir_cache(snap, tmp_path / "cache", "R")
+    c = datos.cargar_cache(tmp_path / "cache", hasta=datos.FIN_ENTRENAMIENTO)
+    e = datos.cargar_dataset(snap, ["R_5", "DAYS_SINCE_FIRST_SEEN"])
+    assert list(c.columns) == ["SSD_KEY", "OBSERVATION_DATE", "DAYS_TO_FAILURE", "TARGET_30D",
+                               "R_5", "DAYS_SINCE_FIRST_SEEN"]  # sin columnas N
+    assert (c["SSD_KEY"].astype(str).to_numpy() == e["SSD_KEY"].astype(str).to_numpy()).all()
+    assert np.array_equal(c["R_5"].to_numpy(), e["R_5"].to_numpy())
+    assert (c["OBSERVATION_DATE"].to_numpy() == e["OBSERVATION_DATE"].to_numpy()).all()
+    solo_sep = datos.cargar_cache(tmp_path / "cache", desde=pd.Timestamp("2019-09-01").date())
+    assert len(solo_sep) == 4 and solo_sep["OBSERVATION_DATE"].min() == pd.Timestamp("2019-09-01")
+
+
 def test_prep_reutilizable_y_orden_de_filas_irrelevante(df):
     s = df["R_5"].to_numpy()
     prep = pl.preparar_eventos(df["SSD_KEY"], df["OBSERVATION_DATE"], df["DAYS_TO_FAILURE"])

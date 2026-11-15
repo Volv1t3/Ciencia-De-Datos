@@ -234,7 +234,10 @@ def hash_snapshot(directorio: str | Path) -> tuple[str, dict[str, str]]:
     archivos = sorted(base.rglob("*.parquet"))
     if not archivos:
         raise FileNotFoundError(f"No hay Parquet en {base}")
-    por_archivo = {p.relative_to(base).as_posix(): _sha256_archivo(p) for p in archivos}
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=16) as ex:  # hashlib libera el GIL: un hilo por archivo
+        hashes = list(ex.map(_sha256_archivo, archivos))
+    por_archivo = {p.relative_to(base).as_posix(): h for p, h in zip(archivos, hashes)}
     lineas = "\n".join(f"{k} {v}" for k, v in sorted(por_archivo.items()))
     return hashlib.sha256(lineas.encode()).hexdigest(), por_archivo
 
@@ -285,13 +288,16 @@ def archivos_snapshot(directorio: str | Path) -> list[Path]:
 
 def cargar_dataset(directorio: str | Path, columnas: list[str] | None = None,
                    verificar_hash: bool = True, desde: date | None = None,
-                   hasta: date | None = None) -> pd.DataFrame:
-    """Lee el snapshot. Features en float32 (la mitad de memoria); verifica el hash por defecto.
+                   hasta: date | None = None, como: str = "pandas"):
+    """Lee el snapshot con polars (multihilo). Features en float32; verifica el hash por defecto.
 
-    `desde`/`hasta` (inclusive) filtran por OBSERVATION_DATE al leer, sin cargar el resto.
+    - `desde`/`hasta` (inclusive) filtran por OBSERVATION_DATE al leer, sin cargar el resto.
+    - Orden determinista (OBSERVATION_DATE, SSD_KEY). `SSD_KEY` queda como categoría: con
+      100M filas, como texto ocupa decenas de GB y hace lentos groupby y factorize.
+    - `como="polars"` devuelve el DataFrame de polars (EDA); "pandas" (defecto) es lo que
+      consumen scikit-learn y MLflow.
     """
-    import pyarrow.compute as pc
-    import pyarrow.dataset as ds
+    import polars as pl
 
     base = Path(directorio)
     if verificar_hash:
@@ -299,20 +305,108 @@ def cargar_dataset(directorio: str | Path, columnas: list[str] | None = None,
         obtenido, _ = hash_snapshot(base)
         if obtenido != esperado:
             raise ValueError(f"El snapshot cambió: hash {obtenido} != manifiesto {esperado}")
+    lf = pl.scan_parquet([str(p) for p in archivos_snapshot(base)], hive_partitioning=False)
     if columnas is not None:
-        columnas = list(dict.fromkeys(list(COLUMNAS_META) + list(columnas)))
-    dataset = ds.dataset([str(p) for p in archivos_snapshot(base)], format="parquet")
-    filtro = None
-    for limite, op in ((desde, pc.greater_equal), (hasta, pc.less_equal)):
-        if limite is not None:
-            f = op(ds.field("OBSERVATION_DATE"), pa_fecha(limite))
-            filtro = f if filtro is None else filtro & f
-    df = dataset.to_table(columns=columnas, filter=filtro).to_pandas()
-    df["OBSERVATION_DATE"] = pd.to_datetime(df["OBSERVATION_DATE"])
-    feats = [c for c in df.columns if c not in COLUMNAS_META and c != "SSD_KEY"]
-    df[feats] = df[feats].astype(np.float32)
-    df["TARGET_30D"] = df["TARGET_30D"].astype(np.int8)
-    return df.sort_values(["OBSERVATION_DATE", "SSD_KEY"], kind="stable").reset_index(drop=True)
+        lf = lf.select(list(dict.fromkeys(list(COLUMNAS_META) + list(columnas))))
+    if desde is not None:
+        lf = lf.filter(pl.col("OBSERVATION_DATE") >= desde)
+    if hasta is not None:
+        lf = lf.filter(pl.col("OBSERVATION_DATE") <= hasta)
+    feats = [c for c in lf.collect_schema().names() if c not in COLUMNAS_META]
+    df = (lf.with_columns(pl.col(feats).cast(pl.Float32),
+                          pl.col("DAYS_TO_FAILURE").cast(pl.Float32),
+                          pl.col("TARGET_30D").cast(pl.Int8))
+            .sort(["OBSERVATION_DATE", "SSD_KEY"])          # se ordena el texto: determinista
+            .with_columns(pl.col("SSD_KEY").cast(pl.Categorical))
+            .collect())
+    if como == "polars":
+        return df
+    pdf = df.to_pandas()
+    pdf["OBSERVATION_DATE"] = pdf["OBSERVATION_DATE"].astype("datetime64[ns]")
+    return pdf
+
+
+# --------------------------------------------------------------------------------------------
+# Caché de modelado: matriz float32 en disco (se construye una vez por snapshot y variante)
+# --------------------------------------------------------------------------------------------
+def columnas_variante(nombres, variante: str = "R") -> list[str]:
+    prefijos = tuple(f"{v}_" for v in variante)
+    return [c for c in nombres if c.startswith(prefijos) or c == FEATURE_EDAD]
+
+
+def construir_cache(directorio: str | Path, destino: str | Path, variante: str = "R") -> Path:
+    """Convierte el snapshot en  X.npy (float32, orden Fortran) + meta.parquet + cache.json.
+
+    Las filas quedan ordenadas por (OBSERVATION_DATE, SSD_KEY) y SSD_KEY se guarda como entero
+    (`SSD_CODE`, índice en `ssd_keys`). Se procesa mes a mes, así que la memoria pico es la de
+    un mes. Un rango de fechas es luego un corte contiguo de filas: cargarlo no copia nada.
+    """
+    import polars as pl
+
+    base, destino = Path(directorio), Path(destino)
+    destino.mkdir(parents=True, exist_ok=True)
+    man = leer_manifiesto(base)
+    obtenido, _ = hash_snapshot(base)
+    if obtenido != man["dataset_sha256"]:
+        raise ValueError("El snapshot no coincide con su manifiesto")
+    archivos = archivos_snapshot(base)
+    lf = pl.scan_parquet([str(p) for p in archivos], hive_partitioning=False)
+    feats = columnas_variante(lf.collect_schema().names(), variante)
+    claves = (lf.select(pl.col("SSD_KEY").unique().sort()).collect()
+              .with_row_index("SSD_CODE").with_columns(pl.col("SSD_CODE").cast(pl.Int32)))
+    n = man["filas"]
+    X = np.lib.format.open_memmap(destino / "X.npy", mode="w+", dtype=np.float32,
+                                  shape=(n, len(feats)), fortran_order=True)
+    metas, fila = [], 0
+    for mes in sorted({p.parent.name for p in archivos}):
+        lfm = pl.scan_parquet([str(p) for p in archivos if p.parent.name == mes], hive_partitioning=False)
+        d = (lfm.select(list(COLUMNAS_META) + feats)
+             .with_columns(pl.col(feats).cast(pl.Float32), pl.col("DAYS_TO_FAILURE").cast(pl.Float32),
+                           pl.col("TARGET_30D").cast(pl.Int8))
+             .sort(["OBSERVATION_DATE", "SSD_KEY"]).collect()
+             .join(claves, on="SSD_KEY", how="left", maintain_order="left"))
+        X[fila:fila + d.height, :] = d.select(feats).to_numpy(order="fortran")
+        metas.append(d.select("SSD_CODE", "OBSERVATION_DATE", "DAYS_TO_FAILURE", "TARGET_30D"))
+        fila += d.height
+    assert fila == n, f"Filas escritas {fila} != manifiesto {n}"
+    X.flush()
+    del X
+    meta = pl.concat(metas)
+    assert meta["OBSERVATION_DATE"].is_sorted(), "Los meses deben quedar en orden cronológico"
+    meta.write_parquet(destino / "meta.parquet")
+    claves.select("SSD_KEY").write_parquet(destino / "ssd_keys.parquet")
+    (destino / "cache.json").write_text(json.dumps({
+        "variante": variante, "columnas": feats, "filas": n,
+        "dataset_sha256": man["dataset_sha256"], "tabla_origen": man["tabla_origen"],
+    }, indent=2, ensure_ascii=False))
+    return destino
+
+
+def cargar_cache(destino: str | Path, desde: date | None = None, hasta: date | None = None,
+                 sha_esperado: str | None = None) -> pd.DataFrame:
+    """DataFrame (vista sobre el memmap, sin copiar las features) para un rango de fechas.
+
+    `SSD_KEY` es categórica (códigos enteros + catálogo), no 100M textos.
+    """
+    import polars as pl
+
+    destino = Path(destino)
+    info = json.loads((destino / "cache.json").read_text())
+    if sha_esperado is not None and info["dataset_sha256"] != sha_esperado:
+        raise ValueError("La caché se construyó con otro snapshot")
+    meta = pl.read_parquet(destino / "meta.parquet")
+    fechas = meta["OBSERVATION_DATE"].to_numpy().astype("datetime64[D]")
+    i0 = 0 if desde is None else int(np.searchsorted(fechas, np.datetime64(desde, "D"), side="left"))
+    i1 = len(fechas) if hasta is None else int(np.searchsorted(fechas, np.datetime64(hasta, "D"), side="right"))
+    X = np.load(destino / "X.npy", mmap_mode="r")[i0:i1]
+    df = pd.DataFrame(X, columns=info["columnas"], copy=False)
+    m = meta.slice(i0, i1 - i0)
+    keys = pl.read_parquet(destino / "ssd_keys.parquet")["SSD_KEY"].to_numpy()
+    df.insert(0, "SSD_KEY", pd.Categorical.from_codes(m["SSD_CODE"].to_numpy(), categories=keys))
+    df.insert(1, "OBSERVATION_DATE", m["OBSERVATION_DATE"].to_numpy().astype("datetime64[ns]"))
+    df.insert(2, "DAYS_TO_FAILURE", m["DAYS_TO_FAILURE"].to_numpy())
+    df.insert(3, "TARGET_30D", m["TARGET_30D"].to_numpy())
+    return df
 
 
 def pa_fecha(d: date):
@@ -329,9 +423,10 @@ def split_holdout(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
     El embargo de 30 días existe porque la etiqueta de un día t mira hasta t+30: sin él, las
     últimas filas de entrenamiento compartirían la falla que se intenta predecir en prueba.
     """
-    fechas = df["OBSERVATION_DATE"].dt.date
-    train = df[(fechas >= INICIO_DATOS) & (fechas <= FIN_ENTRENAMIENTO)]
-    prueba = df[(fechas >= INICIO_PRUEBA) & (fechas <= FIN_PRUEBA)]
+    fechas = df["OBSERVATION_DATE"]
+    ts = pd.Timestamp
+    train = df[(fechas >= ts(INICIO_DATOS)) & (fechas <= ts(FIN_ENTRENAMIENTO))]
+    prueba = df[(fechas >= ts(INICIO_PRUEBA)) & (fechas <= ts(FIN_PRUEBA))]
     hueco = (pd.Timestamp(INICIO_PRUEBA) - pd.Timestamp(FIN_ENTRENAMIENTO)).days
     assert hueco > 30, "El embargo entre entrenamiento y prueba debe superar 30 días"
     return train.reset_index(drop=True), prueba.reset_index(drop=True)

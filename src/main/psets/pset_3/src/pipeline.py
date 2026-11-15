@@ -77,9 +77,11 @@ class FeaturesDerivadas(BaseEstimator, TransformerMixin):
     los 30 anteriores: es información disponible el día de la predicción. Sin estado aprendido.
     """
 
-    def __init__(self, atributos=ATRIBUTOS_CRITICOS_DEFECTO, representacion: str = "R"):
+    def __init__(self, atributos=ATRIBUTOS_CRITICOS_DEFECTO, representacion: str = "R",
+                 salida: str = "pandas"):
         self.atributos = atributos
         self.representacion = representacion
+        self.salida = salida  # "numpy": matriz float32 lista para XGBoost/árboles (una sola copia)
 
     def _columnas(self, X):
         return [c for a in self.atributos
@@ -91,10 +93,17 @@ class FeaturesDerivadas(BaseEstimator, TransformerMixin):
         return self
 
     def transform(self, X):
-        X = X.copy()
         shifts = X[self.columnas_shift_].to_numpy(dtype=np.float32, na_value=np.nan)
-        X[FEATURE_DEGRADACION] = np.nansum(shifts > 0, axis=1).astype(np.float32)
-        return X
+        degradacion = np.sum(shifts > 0, axis=1).astype(np.float32)  # NaN > 0 es False
+        if self.salida == "numpy":
+            salida = np.empty((len(X), X.shape[1] + 1), dtype=np.float32)
+            salida[:, :-1] = X.to_numpy(dtype=np.float32, na_value=np.nan)
+            salida[:, -1] = degradacion
+            return salida
+        # pandas: sin X.copy() (con 100M filas duplicaría ~170 GB); concat no copia las columnas
+        sin_copia = {} if int(pd.__version__.split(".")[0]) >= 3 else {"copy": False}  # pandas 3: CoW
+        return pd.concat([X, pd.Series(degradacion, index=X.index, name=FEATURE_DEGRADACION)],
+                         axis=1, **sin_copia)
 
     def get_feature_names_out(self, input_features=None):
         return np.append(self.feature_names_in_, FEATURE_DEGRADACION)
@@ -117,6 +126,9 @@ def construir_preprocesador(familia: str) -> Pipeline:
     - Lineales, MLP y TabPFN: log1p con signo -> mediana + indicador de faltante -> estándar.
       La imputación vive aquí (no en Silver ni en la OBT) para ajustarse solo con train.
     """
+    if familia in {"bosque", "xgboost"}:
+        # Árboles: matriz float32 directa (XGBoost la sube a la GPU sin pasar por pandas)
+        return Pipeline([("derivadas", FeaturesDerivadas(salida="numpy"))])
     pasos = [("derivadas", FeaturesDerivadas())]
     if familia in {"logistica", "sin_temporales", "mlp", "tabpfn"}:
         numericas = Pipeline([
@@ -315,10 +327,29 @@ N_UMBRALES = 400            # umbrales de la curva PR por evento (espaciados en 
 _SIN_REPETICION = 1 << 40   # episodio_dias=None: un solo episodio por disco en todo el historial
 
 
+def codigos_disco(ssd) -> np.ndarray:
+    """Entero por disco. Con SSD_KEY categórica usa los códigos (no materializa 100M textos)."""
+    if isinstance(ssd, pd.Series) and isinstance(ssd.dtype, pd.CategoricalDtype):
+        return ssd.cat.codes.to_numpy().astype(np.int64)
+    a = np.asarray(ssd)
+    if np.issubdtype(a.dtype, np.integer):
+        return a.astype(np.int64)
+    return pd.factorize(a)[0].astype(np.int64)
+
+
+def dias_desde_epoca(fecha) -> np.ndarray:
+    """`fecha` puede ser datetime (cualquier resolución) o un entero que ya cuenta días."""
+    f = np.asarray(fecha)
+    if np.issubdtype(f.dtype, np.integer):
+        return f.astype(np.int64)  # ya son días: pd.to_datetime los leería como nanosegundos
+    return np.asarray(pd.to_datetime(f), dtype="datetime64[D]").astype(np.int64)
+
+
 def eventos_anticipables(ssd, dias) -> int:
     """Discos con al menos una observación entre 7 y 30 días antes de su falla (denominador)."""
-    d = pd.DataFrame({"ssd": np.asarray(ssd), "dias": np.asarray(dias, dtype=float)})
-    return int(d.loc[d["dias"].between(ANTICIPACION_MIN, ANTICIPACION_MAX), "ssd"].nunique())
+    d = np.asarray(dias, dtype=np.float64)
+    m = (d >= ANTICIPACION_MIN) & (d <= ANTICIPACION_MAX)
+    return int(np.unique(codigos_disco(ssd)[m]).size)
 
 
 @dataclass
@@ -335,18 +366,13 @@ class EventosPreparados:
 
 
 def preparar_eventos(ssd, fecha, dias) -> EventosPreparados:
-    """`fecha` puede ser datetime (cualquier resolución) o un entero que ya cuenta días."""
-    codigos = pd.factorize(np.asarray(ssd))[0]
-    f = np.asarray(fecha)
-    if np.issubdtype(f.dtype, np.integer):
-        f = f.astype(np.int64)  # ya son días: pd.to_datetime los leería como nanosegundos
-    else:
-        f = np.asarray(pd.to_datetime(f), dtype="datetime64[D]").astype(np.int64)
+    codigos = codigos_disco(ssd)
+    f = dias_desde_epoca(fecha)
     orden = np.lexsort((f, codigos))
     c = codigos[orden]
     inicio = np.concatenate([[0], np.flatnonzero(np.diff(c)) + 1, [len(c)]]).astype(np.int64)
     d = np.asarray(dias, dtype=np.float64)
-    return EventosPreparados(orden, inicio, f[orden], d[orden], eventos_anticipables(ssd, dias))
+    return EventosPreparados(orden, inicio, f[orden], d[orden], eventos_anticipables(codigos, dias))
 
 
 try:
@@ -476,7 +502,8 @@ def metricas_evento(ssd, fecha, dias, score, tau: float, beta: float = 0.5,
 # --------------------------------------------------------------------------------------------
 def ssd_meses(ssd, fecha) -> float:
     """Exposición observada: días-disco / 30."""
-    return len(pd.DataFrame({"s": np.asarray(ssd), "f": np.asarray(fecha)}).drop_duplicates()) / 30.0
+    clave = codigos_disco(ssd) * 1_000_000 + dias_desde_epoca(fecha)  # días desde 1970 < 1e6
+    return np.unique(clave).size / 30.0
 
 
 def costo_por_1000(alertas, aciertos, eventos, exposicion_ssd_mes: float, k: float):
@@ -554,12 +581,17 @@ def _score(modelo, X) -> np.ndarray:
 def evaluar_cv(familia_o_modelo, df: pd.DataFrame, columnas: list[str],
                splitter: EmbargoTimeSeriesSplit | None = None, params: dict | None = None,
                seed: int = SEMILLA, al_terminar_pliegue: Callable[[int, float], None] | None = None,
-               max_filas_metrica_train: int | None = 5_000_000) -> tuple[ResultadoCV, object]:
+               max_filas_metrica_train: int | None = 5_000_000,
+               frac_sanos_train: float | None = None) -> tuple[ResultadoCV, object]:
     """CV propia (no cross_val_score): la métrica por evento necesita SSD_KEY, fecha y DAYS_TO_FAILURE.
 
     `al_terminar_pliegue(i, valor)` permite a Optuna podar (lanza optuna.TrialPruned).
-    La métrica de entrenamiento se calcula sobre los discos de una muestra determinista del
-    pliegue de entrenamiento (todos sus eventos incluidos) si supera `max_filas_metrica_train`.
+    `frac_sanos_train`: si se da, cada pliegue ENTRENA con todos los discos que fallan y esa
+    fracción de los sanos (por disco, determinista). La validación usa siempre todas sus filas,
+    así que la métrica no se sesga; solo cambia la prevalencia vista al entrenar (los scores
+    quedan inflados, pero tau se elige sobre las predicciones de validación, no en 0,5).
+    La métrica de entrenamiento se calcula sobre lo que el modelo vio, o sobre una muestra
+    determinista por disco si supera `max_filas_metrica_train`.
     Devuelve también el modelo del último pliegue (el entrenado con más datos).
     """
     verificar_sin_fuga(columnas)
@@ -571,6 +603,8 @@ def evaluar_cv(familia_o_modelo, df: pd.DataFrame, columnas: list[str],
     for i, (itr, iva) in enumerate(splitter.split(df, groups=df["OBSERVATION_DATE"])):
         assert df["OBSERVATION_DATE"].iloc[itr].max() + pd.Timedelta(days=splitter.embargo_dias) \
             < df["OBSERVATION_DATE"].iloc[iva].min(), "Embargo violado"
+        if frac_sanos_train is not None:
+            itr = itr[muestra_por_disco(df.iloc[itr], frac_sanos_train, seed)]
         modelo = clone(base)
         t0 = time.perf_counter()
         modelo.fit(X.iloc[itr], y[itr])
@@ -595,15 +629,34 @@ def evaluar_cv(familia_o_modelo, df: pd.DataFrame, columnas: list[str],
     return ResultadoCV(cv, tr, ap, seg, pd.concat(oofs, ignore_index=True)), modelo
 
 
+def muestra_por_disco(d: pd.DataFrame, frac_sanos: float, seed: int = SEMILLA) -> np.ndarray:
+    """Posiciones a conservar: TODOS los discos con alguna fila positiva + `frac_sanos` del resto.
+
+    Se muestrea por disco (no por fila) para conservar historiales completos, que es lo que
+    usan las features temporales. La elección es determinista: hash del SSD_KEY con la semilla.
+    Solo se aplica al ENTRENAMIENTO; validación y prueba usan siempre todas las filas.
+    """
+    codigos = codigos_disco(d["SSD_KEY"])
+    fallan = np.unique(codigos[d["TARGET_30D"].to_numpy() == 1])
+    es_falla = np.isin(codigos, fallan)
+    h = _hash_disco(d["SSD_KEY"], seed)
+    return np.flatnonzero(es_falla | ((h % 10_000) < frac_sanos * 10_000))
+
+
+def _hash_disco(ssd: pd.Series, seed: int) -> np.ndarray:
+    """Hash por fila que depende solo del texto del SSD_KEY (estable entre cargas y cachés)."""
+    clave = f"{seed:016d}"
+    if isinstance(ssd.dtype, pd.CategoricalDtype):  # un hash por disco, repartido por código
+        hc = pd.util.hash_pandas_object(pd.Series(ssd.cat.categories), index=False, hash_key=clave).to_numpy()
+        return hc[ssd.cat.codes.to_numpy()]
+    return pd.util.hash_pandas_object(pd.Series(np.asarray(ssd)), index=False, hash_key=clave).to_numpy()
+
+
 def _muestra_discos(d: pd.DataFrame, max_filas: int | None, seed: int):
-    """Posiciones de una muestra por disco (todos los que fallan + sanos por hash) o None."""
+    """Posiciones de una muestra por disco de a lo sumo ~max_filas filas, o None."""
     if max_filas is None or len(d) <= max_filas:
         return None
-    fallan = set(d.loc[d["TARGET_30D"] == 1, "SSD_KEY"])
-    h = pd.util.hash_pandas_object(d["SSD_KEY"], index=False, hash_key=f"{seed:016d}").to_numpy()
-    frac = max(max_filas - d["SSD_KEY"].isin(fallan).sum(), 0) / len(d)
-    keep = d["SSD_KEY"].isin(fallan).to_numpy() | ((h % 10_000) < frac * 10_000)
-    return np.flatnonzero(keep)
+    return muestra_por_disco(d, max_filas / len(d), seed)
 
 
 # --------------------------------------------------------------------------------------------
