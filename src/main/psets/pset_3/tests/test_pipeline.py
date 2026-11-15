@@ -107,6 +107,17 @@ def test_curva_evento_coincide_con_fuerza_bruta(df, episodio_dias):
     assert 0 <= curva.pr_auc <= 1
 
 
+def test_fechas_como_dias_enteros_equivalen_a_datetime(df):
+    s = df["R_5"].to_numpy()
+    dias_int = df["OBSERVATION_DATE"].to_numpy().astype("datetime64[D]").astype(np.int32)
+    a = pl.curva_evento(df["SSD_KEY"], df["OBSERVATION_DATE"], df["DAYS_TO_FAILURE"], s)
+    b = pl.curva_evento(df["SSD_KEY"], dias_int, df["DAYS_TO_FAILURE"], s)
+    assert np.array_equal(a.alertas, b.alertas) and a.pr_auc == pytest.approx(b.pr_auc)
+    # y con episodios repetibles hay más alertas que con la lectura literal
+    lit = pl.curva_evento(df["SSD_KEY"], dias_int, df["DAYS_TO_FAILURE"], s, episodio_dias=None)
+    assert b.alertas[-1] > lit.alertas[-1]
+
+
 def test_prep_reutilizable_y_orden_de_filas_irrelevante(df):
     s = df["R_5"].to_numpy()
     prep = pl.preparar_eventos(df["SSD_KEY"], df["OBSERVATION_DATE"], df["DAYS_TO_FAILURE"])

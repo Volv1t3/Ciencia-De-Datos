@@ -335,8 +335,13 @@ class EventosPreparados:
 
 
 def preparar_eventos(ssd, fecha, dias) -> EventosPreparados:
+    """`fecha` puede ser datetime (cualquier resolución) o un entero que ya cuenta días."""
     codigos = pd.factorize(np.asarray(ssd))[0]
-    f = np.asarray(pd.to_datetime(np.asarray(fecha)), dtype="datetime64[D]").astype(np.int64)
+    f = np.asarray(fecha)
+    if np.issubdtype(f.dtype, np.integer):
+        f = f.astype(np.int64)  # ya son días: pd.to_datetime los leería como nanosegundos
+    else:
+        f = np.asarray(pd.to_datetime(f), dtype="datetime64[D]").astype(np.int64)
     orden = np.lexsort((f, codigos))
     c = codigos[orden]
     inicio = np.concatenate([[0], np.flatnonzero(np.diff(c)) + 1, [len(c)]]).astype(np.int64)
