@@ -275,6 +275,28 @@ def test_metrica_train_no_se_infla_con_submuestra_de_sanos(df):
     assert sub.resumen["train_pr_auc_evento"] == pytest.approx(completo.resumen["train_pr_auc_evento"], rel=0.5)
 
 
+def test_tuning_corridas_anidadas_y_retoma(df, tmp_path):
+    optuna = pytest.importorskip("optuna")
+    mlflow = pytest.importorskip("mlflow")
+    pytest.importorskip("sqlalchemy")
+    from src import experimentos as exp, tuning
+    optuna.logging.set_verbosity(optuna.logging.WARNING)
+    mlflow.set_tracking_uri(f"sqlite:///{(tmp_path / 'mlflow.db').as_posix()}")
+    mlflow.set_experiment(mlflow.create_experiment("t", artifact_location=(tmp_path / "art").as_uri()))
+    ctx = exp.Contexto(train=df, columnas=pl.columnas_modelo(df, "R"),
+                       splitter=pl.EmbargoTimeSeriesSplit(n_splits=2, meses_validacion=2),
+                       oof_dir=tmp_path / "oof", meta_datos={"datos_sha256": "abc"}, variante="R",
+                       frac_sanos=0.5)
+    storage = f"sqlite:///{(tmp_path / 'optuna.db').as_posix()}"
+    st = tuning.tunear(ctx, "logistica", storage, n_trials=3)
+    assert len(st.trials) == 3 and np.isfinite(st.best_value)
+    padre = st.user_attrs["mlflow_run_padre"]
+    hijas = mlflow.search_runs(filter_string=f"tags.mlflow.parentRunId = '{padre}'")
+    assert len(hijas) == 3 and set(hijas["tags.fase"]) == {"tuning"}
+    st2 = tuning.tunear(ctx, "logistica", storage, n_trials=3)   # retoma: no agrega configuraciones
+    assert len(st2.trials) == 3 and st2.user_attrs["mlflow_run_padre"] == padre
+
+
 def test_prep_reutilizable_y_orden_de_filas_irrelevante(df):
     s = df["R_5"].to_numpy()
     prep = pl.preparar_eventos(df["SSD_KEY"], df["OBSERVATION_DATE"], df["DAYS_TO_FAILURE"])
