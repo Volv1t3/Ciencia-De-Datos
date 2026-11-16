@@ -192,7 +192,7 @@ def test_xgb_balanceado_pickle_y_clone(df, familia):
 
 
 def test_mlp_entrena_con_etiqueta_entera_y_hace_pickle(df):
-    pytest.importorskip("skorch")
+    pytest.importorskip("torch")
     import pickle
     cols = pl.columnas_modelo(df, "R")
     m = pl.construir_modelo("mlp", {"max_epochs": 1, "batch_size": 1024})
