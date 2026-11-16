@@ -71,6 +71,10 @@ services:
       TABPFN_NO_BROWSER: "1"
       PYTHONHASHSEED: "0"
       HOME: /tmp/home
+      # numpy pide páginas gigantes (THP) para cada arreglo grande; con la RAM del servidor llena
+      # de caché, el kernel se bloquea compactando memoria (miles de compact_stall por segundo) y
+      # los procesos pasan casi todo su tiempo en el sistema. Con páginas normales no ocurre.
+      NUMPY_MADVISE_HUGEPAGE: "0"
       # torch (pip) trae NCCL 2.30 y RAPIDS (conda) NCCL 2.27. Si cuML se importa antes que
       # torch, se carga la 2.27 y torch falla (undefined symbol ncclCommResume). Precargar la
       # 2.30, compatible hacia atrás, hace que el orden de imports no importe.
@@ -114,6 +118,7 @@ services:
       DATOS_DIR: /datos
       PYTHONHASHSEED: "0"
       HOME: /tmp/home
+      NUMPY_MADVISE_HUGEPAGE: "0"   # ver jupyter-gpu
       LD_PRELOAD: /opt/conda/lib/python3.12/site-packages/nvidia/nccl/lib/libnccl.so.2
       TABPFN_MODEL_PATH: /datos/modelos/tabpfn/tabpfn-v3.5-fast-20260909.safetensors
       TABPFN_NO_BROWSER: "1"
