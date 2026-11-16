@@ -71,6 +71,20 @@ class ResultadoLLM:
     lotes_fallidos: list = field(default_factory=list)
 
 
+def muestra_evaluacion(meta: pd.DataFrame, splitter, seed: int = 42, n_pos: int = 100,
+                      n_neg: int = 400) -> np.ndarray:
+    """Posiciones (en `meta`) de la submuestra estratificada del ÚLTIMO pliegue de validación.
+
+    La usan el notebook 03 y scripts/correr_llm.py: mismos casos, misma caché.
+    """
+    _, iva = list(splitter.split(meta))[-1]
+    y = meta["TARGET_30D"].to_numpy()[iva]
+    rng = np.random.default_rng(seed)
+    sel = np.sort(np.concatenate([rng.choice(np.flatnonzero(y == 1), n_pos, replace=False),
+                                  rng.choice(np.flatnonzero(y == 0), n_neg, replace=False)]))
+    return iva[sel]
+
+
 def _clave(modelo: str, lote: list[dict]) -> str:
     texto = json.dumps({"modelo": MODELO_LLM if modelo is None else modelo, "instr": INSTRUCCIONES,
                         "lote": lote}, sort_keys=True, ensure_ascii=False)
@@ -78,11 +92,13 @@ def _clave(modelo: str, lote: list[dict]) -> str:
 
 
 def predecir(X: pd.DataFrame, cache_dir: str | Path, *, modelo: str = MODELO_LLM,
-             casos_por_lote: int = 20, pausa_s: float = 6.0, max_reintentos: int = 8,
-             seed: int = 42, api_key: str | None = None) -> ResultadoLLM:
+             casos_por_lote: int = 20, pausa_s: float = 6.0, max_reintentos: int = 25,
+             timeout_s: int = 600, seed: int = 42, api_key: str | None = None) -> ResultadoLLM:
     """Probabilidad de falla para cada fila de X (en el mismo orden).
 
     `pausa_s` espacia las llamadas (6 s ≈ 10 solicitudes/min) para no tocar el límite gratuito.
+    Ante 429 (límite de frecuencia) o 5xx (p. ej. 503 "high demand" del nivel gratuito) se
+    reintenta con espera exponencial de hasta 15 min; `timeout_s` corta una llamada colgada.
     """
     from google import genai  # noqa: PLC0415
     from google.genai import errors, types  # noqa: PLC0415
@@ -110,7 +126,8 @@ def predecir(X: pd.DataFrame, cache_dir: str | Path, *, modelo: str = MODELO_LLM
             res.respuestas_cache += 1
         else:
             if cliente is None:
-                cliente = genai.Client(api_key=api_key or os.environ["GEMINI_API_KEY"])
+                cliente = genai.Client(api_key=api_key or os.environ["GEMINI_API_KEY"],
+                                       http_options=types.HttpOptions(timeout=timeout_s * 1000))
             contenido = "Drive-days (JSON):\n" + json.dumps(lote, ensure_ascii=False)
             for intento in range(max_reintentos):
                 try:
@@ -118,14 +135,18 @@ def predecir(X: pd.DataFrame, cache_dir: str | Path, *, modelo: str = MODELO_LLM
                     r = cliente.models.generate_content(model=modelo, contents=contenido, config=config)
                     seg = time.perf_counter() - t0
                     break
-                except errors.ClientError as e:
-                    if getattr(e, "code", None) != 429 or intento == max_reintentos - 1:
+                except (errors.ClientError, errors.ServerError) as e:
+                    reintentable = isinstance(e, errors.ServerError) or getattr(e, "code", None) == 429
+                    if not reintentable or intento == max_reintentos - 1:
                         raise
-                    time.sleep(min(30 * 2 ** intento, 600))   # límite de frecuencia: esperar y reintentar
-                except errors.ServerError:
+                    espera = min(30 * 2 ** intento, 900)
+                    print(f"Gemini {getattr(e, 'code', '?')}: reintento {intento + 1} en {espera} s", flush=True)
+                    time.sleep(espera)
+                except Exception as e:  # noqa: BLE001 - timeout o corte de red: reintentar igual
                     if intento == max_reintentos - 1:
                         raise
-                    time.sleep(min(10 * 2 ** intento, 300))
+                    print(f"Gemini {type(e).__name__}: reintento {intento + 1}", flush=True)
+                    time.sleep(min(30 * 2 ** intento, 900))
             u = r.usage_metadata
             guardado = {"respuesta": r.text, "segundos": seg,
                         "tokens": [u.prompt_token_count or 0, u.candidates_token_count or 0,
