@@ -1,8 +1,9 @@
 # Entorno de entrenamiento en GPU.
-# La imagen de RAPIDS trae CUDA, cuDF, cuML, XGBoost con CUDA, JupyterLab y scikit-learn.
-# Verificar en https://hub.docker.com/r/rapidsai/notebooks que la etiqueta exista y sea
-# compatible con el driver del H200 (`nvidia-smi` -> "CUDA Version" >= la de la imagen).
-ARG RAPIDS_IMAGE=rapidsai/notebooks:25.06-cuda12.8-py3.12
+# La imagen de RAPIDS trae CUDA, cuDF, cuML, XGBoost con CUDA, polars (+ motor GPU), JupyterLab y
+# scikit-learn. Se fija por digest (no solo por etiqueta): una etiqueta puede reapuntar a otra
+# imagen; el digest no. Requiere en el host un driver NVIDIA compatible con CUDA 12.8
+# (`nvidia-smi` -> "CUDA Version" >= 12.8) y nvidia-container-toolkit.
+ARG RAPIDS_IMAGE=rapidsai/notebooks:25.06-cuda12.8-py3.12@sha256:1dc9419de1c42d3da1033bfb515983b824ae7a8196a7e1fd449c90f933a8880b
 FROM ${RAPIDS_IMAGE}
 
 USER root
@@ -10,7 +11,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /
 # El repo se monta con otro dueño: sin esto, `git rev-parse` falla dentro del contenedor.
 RUN git config --system --add safe.directory '*'
 
-COPY requirements.txt /tmp/requirements.txt
-RUN pip install --no-cache-dir -r /tmp/requirements.txt
+# requirements.txt dice QUÉ se necesita; constraints.txt fija la versión EXACTA de todo lo que
+# instala pip (incluidas dependencias transitivas), congelada del entorno probado en el H200.
+COPY requirements.txt constraints.txt /tmp/
+RUN pip install --no-cache-dir -r /tmp/requirements.txt -c /tmp/constraints.txt
 
 USER rapids

@@ -28,9 +28,29 @@ Todo el experimento usa la OBT completa (~115M filas SSD-día; las que tienen et
 | GPU | NVIDIA con ≥ 80 GB (se usó un H200 de 141 GB) | XGBoost, cuML, la MLP y TabPFN en CUDA |
 | RAM del host | ≥ 512 GB | La variante R en float32 ocupa ~200 GB y la CV hace copias por pliegue |
 | Disco | ≥ 400 GB libres | Snapshot Parquet y artefactos de MLflow |
-| Software | Docker con `nvidia-container-toolkit` y un driver compatible con la imagen de RAPIDS | `docker/Dockerfile.gpu` |
+| Software del host | Docker Engine + Compose v2, `nvidia-container-toolkit` y un driver NVIDIA con CUDA ≥ 12.8 | Lo único que la imagen no puede traer consigo |
 
 Para comprobarlo en el servidor: `nvidia-smi`, `free -g`, `df -h` y `docker run --rm --gpus all nvidia/cuda:12.8.0-base-ubuntu24.04 nvidia-smi`.
+
+### Cómo se garantiza que el entorno se reconstruye igual en otra máquina
+
+No hace falta aprovisionar nada con Terraform: la máquina con GPU ya existe y todo el software vive
+en las imágenes. Lo que se fija es cada versión:
+
+| Capa | Archivo | Cómo se fija |
+|---|---|---|
+| Imágenes base | `docker/Dockerfile.gpu`, `docker/Dockerfile.mlflow`, `docker-compose.yml` | Etiqueta **y digest** `@sha256:…` (RAPIDS 25.06, Python 3.12.16, Postgres 17) |
+| Paquetes de pip | `requirements.txt` + `constraints.txt` | `pip install -r requirements.txt -c constraints.txt`: versión exacta de todo lo que instala pip, incluidas las dependencias transitivas |
+| Paquetes del conda de RAPIDS | Vienen en la imagen base | El digest los fija |
+| Registro completo | `requirements.lock.txt` | `pip freeze` del contenedor que corrió los notebooks |
+
+Si se cambia `requirements.txt`: reconstruir, volver a congelar y regenerar las restricciones:
+
+```bash
+docker compose build jupyter-gpu && docker compose up -d jupyter-gpu
+docker compose exec jupyter-gpu pip freeze > requirements.lock.txt
+grep -vE '@ file://' requirements.lock.txt | grep '==' > constraints.txt   # y reponer el encabezado
+```
 
 ## 1. Levantar MLflow y el entorno en el servidor
 
@@ -51,8 +71,8 @@ ssh -N -L 5050:localhost:5050 -L 8888:localhost:8888 usuario@servidor-h200
 # MLflow: http://localhost:5050   ·   Jupyter: http://localhost:8888/?token=<JUPYTER_TOKEN>
 ```
 
-Después del primer build, congela el entorno y versiónalo:
-`docker compose exec jupyter-gpu pip freeze > requirements.lock.txt`.
+El entorno ya está congelado en `requirements.lock.txt` y `constraints.txt` (ver "Cómo se
+garantiza que el entorno se reconstruye igual").
 
 ## 2. Conexión a Snowflake
 

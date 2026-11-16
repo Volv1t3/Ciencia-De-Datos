@@ -8,7 +8,8 @@ name: fteran-pset3
 services:
   # Backend store de MLflow: experimentos, corridas, parámetros, métricas y Model Registry.
   mlflow-postgres:
-    image: postgres:17-alpine
+    # Fijada por digest: la etiqueta 17-alpine se mueve con cada parche de Postgres/Alpine.
+    image: postgres:17-alpine@sha256:d3244e8ce3f165ee3c93d9c4a4b1d0fe48b3a89e2287b717fdcbbde92d405065
     restart: unless-stopped
     environment:
       POSTGRES_DB: ${MLFLOW_POSTGRES_DB:?set MLFLOW_POSTGRES_DB in .env}
