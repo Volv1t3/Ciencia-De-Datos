@@ -21,10 +21,11 @@ import numpy as np
 from src import experimentos as exp, pipeline as pl
 
 N_TRIALS = 30
-# Familias con preprocesamiento caro (log1p + imputación + escala sobre ~14M × 480 por pliegue):
-# se ajusta una vez por pliegue y se reutiliza en todas sus configuraciones (pipeline.evaluar_cv).
-# Los árboles reciben la matriz casi sin transformar y no lo necesitan (ahorra ~150 GB de RAM).
-FAMILIAS_CON_CACHE = {"mlp", "logistica"}
+# El paso "prep" de cada pliegue se ajusta una vez y sus matrices se reutilizan en todas las
+# configuraciones (pipeline.evaluar_cv). En la MLP y la logística ahorra el preprocesamiento; en los
+# árboles, copiar ~70 GB por configuración desde la caché en disco (en el bosque eran ~35 de los
+# ~60 min de cada configuración). Cuesta ~120-150 GB de RAM por proceso.
+FAMILIAS_CON_CACHE = {"mlp", "logistica", "xgboost", "bosque"}
 _CACHE_PREP: dict = {}
 
 
