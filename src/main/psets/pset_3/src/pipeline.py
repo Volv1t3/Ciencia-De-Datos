@@ -240,6 +240,11 @@ def _mlp_skorch(params: dict, seed: int):
     )
 
 
+def _hay_cuml() -> bool:
+    import importlib.util  # noqa: PLC0415
+    return importlib.util.find_spec("cuml") is not None
+
+
 class _BalanceoAuto:
     """Mixin para clasificadores XGBoost: acepta scale_pos_weight="balanced".
 
@@ -287,6 +292,14 @@ def construir_estimador(familia: str, params: dict | None = None, seed: int = SE
     if familia == "regla":
         return ReglaUmbralSMART(**params)
     if familia in {"logistica", "sin_temporales"}:
+        # En GPU con cuML (mismo modelo: L2 + class_weight, solver quasi-Newton). Con 14M × 483,
+        # la de scikit-learn en CPU pasó 40 min sin converger en un pliegue. Sin cuML (pruebas
+        # locales) se usa scikit-learn; `motor` queda en los parámetros registrados.
+        motor = params.pop("motor", "cuml" if _hay_cuml() else "sklearn")
+        if motor == "cuml":
+            from cuml.linear_model import LogisticRegression as LogisticaGPU  # noqa: PLC0415
+            return LogisticaGPU(**({"max_iter": 1000, "class_weight": "balanced", "C": 1.0,
+                                    "output_type": "numpy"} | params))
         from sklearn.linear_model import LogisticRegression  # noqa: PLC0415
         return LogisticRegression(**({"max_iter": 1000, "class_weight": "balanced",
                                       "random_state": seed} | params))
