@@ -209,6 +209,24 @@ def test_tabpfn_no_supera_500_features(df):
     assert salida.shape[1] <= 500
 
 
+def test_llm_no_ve_etiquetas_y_usa_cache(df, tmp_path):
+    pytest.importorskip("google.genai")
+    import json as _json
+    from src import llm
+    caso = llm.resumen_caso(df.iloc[0])
+    texto = _json.dumps(caso)
+    for prohibida in pl.COLUMNAS_PROHIBIDAS:
+        assert prohibida not in texto                      # sin etiquetas, fechas ni SSD_KEY
+    X = df.iloc[:3]
+    lote = [{"id": i, **llm.resumen_caso(f)} for i, (_, f) in enumerate(X.iterrows())]
+    respuesta = _json.dumps([{"id": i, "probabilidad": p} for i, p in enumerate([0.1, 0.9, 0.5])])
+    (tmp_path / f"{llm._clave(llm.MODELO_LLM, lote)}.json").write_text(
+        _json.dumps({"respuesta": respuesta, "segundos": 1.0, "tokens": [10, 5, 0]}))
+    r = llm.predecir(X, tmp_path, api_key="no-se-usa")      # todo sale de la caché: no llama a la API
+    assert r.llamadas_api == 0 and r.respuestas_cache == 1
+    assert np.allclose(r.probabilidades, [0.1, 0.9, 0.5])
+
+
 def test_prep_reutilizable_y_orden_de_filas_irrelevante(df):
     s = df["R_5"].to_numpy()
     prep = pl.preparar_eventos(df["SSD_KEY"], df["OBSERVATION_DATE"], df["DAYS_TO_FAILURE"])
