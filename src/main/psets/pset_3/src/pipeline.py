@@ -206,8 +206,11 @@ class ConSubmuestra(BaseEstimator, ClassifierMixin):
         self.classes_ = self.estimador_.classes_
         return self
 
-    def predict_proba(self, X):
-        return self.estimador_.predict_proba(X)
+    def predict_proba(self, X, lote: int = 200_000):
+        # Por bloques: predecir los ~10M de filas de un pliegue de una vez agotó la memoria de la GPU.
+        partes = [self.estimador_.predict_proba(X.iloc[i:i + lote] if hasattr(X, "iloc") else X[i:i + lote])
+                  for i in range(0, len(X), lote)]
+        return np.concatenate(partes) if partes else np.zeros((0, 2))
 
     def predict(self, X):
         return self.estimador_.predict(X)
