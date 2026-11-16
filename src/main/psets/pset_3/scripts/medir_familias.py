@@ -23,11 +23,12 @@ t = time.time()
 eda = json.loads((Path(__file__).resolve().parents[1] / "docs" / "eda_decisiones.json").read_text())
 df = datos.cargar_cache(DATOS / "cache_R", hasta=datos.FIN_ENTRENAMIENTO)
 cols = pl.columnas_modelo(df, eda["variante"])
-itr, iva = list(pl.EmbargoTimeSeriesSplit().split(df))[-1]
-itr = itr[pl.muestra_por_disco(df.iloc[itr], FRAC_SANOS)]
+meta = df[["SSD_KEY", "OBSERVATION_DATE", "DAYS_TO_FAILURE", "TARGET_30D"]]  # sin las 419 features
+itr, iva = list(pl.EmbargoTimeSeriesSplit().split(meta))[-1]
+itr = itr[pl.muestra_por_disco(meta.iloc[itr], FRAC_SANOS)]
 idx = df.columns.get_indexer(cols)
-Xtr, ytr = df.iloc[itr, idx], df["TARGET_30D"].to_numpy()[itr]
-Xva, dva = df.iloc[iva, idx], df.iloc[iva][["SSD_KEY", "OBSERVATION_DATE", "DAYS_TO_FAILURE"]]
+Xtr, ytr = df.iloc[itr, idx], meta["TARGET_30D"].to_numpy()[itr]
+Xva, dva = df.iloc[iva, idx], meta.iloc[iva]
 prep = pl.preparar_eventos(dva["SSD_KEY"], dva["OBSERVATION_DATE"], dva["DAYS_TO_FAILURE"])
 print(json.dumps({"carga_s": round(time.time() - t, 1), "filas_train": len(itr), "filas_val": len(iva),
                   "positivas_train": int(ytr.sum()), "features": len(cols)}), flush=True)
