@@ -4,7 +4,6 @@ aiosignal @ file:///home/conda/feedstock_root/build_artifacts/aiosignal_17343421
 alembic==1.16.2
 annotated-doc==0.0.6
 annotated-types==0.8.0
-anthropic==2.8.0
 anyio==4.16.0
 archspec @ file:///home/conda/feedstock_root/build_artifacts/archspec_1737352602016/work
 argon2-cffi @ file:///home/conda/feedstock_root/build_artifacts/argon2-cffi_1749017159514/work
@@ -97,6 +96,7 @@ geopandas @ file:///home/conda/feedstock_root/build_artifacts/geopandas_17488032
 gitdb==4.0.12
 GitPython==3.2.1
 google-auth==2.62.2
+google-genai==3.3.0
 graphene==3.4.3
 graphql-core==3.2.14
 graphql-relay==3.2.0
@@ -310,6 +310,7 @@ tabpfn==2.2.1
 tabpfn-common-utils==0.2.23
 tabulate==0.10.0
 tblib @ file:///home/conda/feedstock_root/build_artifacts/tblib_1743515515538/work
+tenacity==9.1.4
 terminado @ file:///home/conda/feedstock_root/build_artifacts/terminado_1710262609923/work
 threadpoolctl @ file:///home/conda/feedstock_root/build_artifacts/threadpoolctl_1741878222898/work
 thriftpy2 @ file:///home/conda/feedstock_root/build_artifacts/thriftpy2_1725456119009/work
@@ -342,6 +343,7 @@ wcwidth @ file:///home/conda/feedstock_root/build_artifacts/wcwidth_173323132628
 webcolors @ file:///home/conda/feedstock_root/build_artifacts/webcolors_1733359735138/work
 webencodings @ file:///home/conda/feedstock_root/build_artifacts/webencodings_1733236011802/work
 websocket-client @ file:///home/conda/feedstock_root/build_artifacts/websocket-client_1733157342724/work
+websockets==17.4
 Werkzeug==3.1.9
 wheel==0.45.1
 widgetsnbextension @ file:///home/conda/feedstock_root/build_artifacts/widgetsnbextension_1744291053367/work
