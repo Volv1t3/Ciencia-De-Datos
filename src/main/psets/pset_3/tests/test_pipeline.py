@@ -175,6 +175,22 @@ def test_cache_coincide_con_cargar_dataset(tmp_path):
     assert len(solo_sep) == 4 and solo_sep["OBSERVATION_DATE"].min() == pd.Timestamp("2019-09-01")
 
 
+@pytest.mark.parametrize("familia", ["xgboost", "bosque"])
+def test_xgb_balanceado_pickle_y_clone(df, familia):
+    pytest.importorskip("xgboost")
+    import pickle
+    from sklearn.base import clone
+    cols = pl.columnas_modelo(df, "R")
+    m = pl.construir_modelo(familia, {"device": "cpu", "n_estimators": 5})
+    m.fit(df[cols], df["TARGET_30D"])
+    est = m.named_steps["modelo"]
+    assert est.scale_pos_weight == "balanced"            # el parámetro pedido no se pierde
+    assert type(est).__module__ == "src.pipeline"
+    m2 = pickle.loads(pickle.dumps(m))                    # pickle encuentra la clase por nombre
+    assert np.allclose(m2.predict_proba(df[cols])[:, 1], m.predict_proba(df[cols])[:, 1])
+    assert clone(m).named_steps["modelo"].get_params()["scale_pos_weight"] == "balanced"
+
+
 def test_prep_reutilizable_y_orden_de_filas_irrelevante(df):
     s = df["R_5"].to_numpy()
     prep = pl.preparar_eventos(df["SSD_KEY"], df["OBSERVATION_DATE"], df["DAYS_TO_FAILURE"])

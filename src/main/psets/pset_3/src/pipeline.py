@@ -240,6 +240,44 @@ def _mlp_skorch(params: dict, seed: int):
     )
 
 
+class _BalanceoAuto:
+    """Mixin para clasificadores XGBoost: acepta scale_pos_weight="balanced".
+
+    "balanced" = negativos/positivos del conjunto con que se entrena, calculado en cada fit:
+    con el submuestreo de discos sanos esa proporción cambia de un pliegue a otro.
+    """
+
+    def fit(self, X, y, **kw):
+        if isinstance(self.scale_pos_weight, str):
+            y_ = np.asarray(y)
+            pedido = self.scale_pos_weight
+            self.scale_pos_weight = float((y_ == 0).sum() / max((y_ == 1).sum(), 1))
+            try:
+                return super().fit(X, y, **kw)
+            finally:
+                self.scale_pos_weight = pedido
+        return super().fit(X, y, **kw)
+
+
+_CLASES_XGB: dict[str, type] = {}
+_NOMBRES_XGB = {"XGBClassifierBalanceado": "XGBClassifier", "XGBRFClassifierBalanceado": "XGBRFClassifier"}
+
+
+def _clase_xgb(nombre: str) -> type:
+    """Clase a nivel de módulo (pickle la encuentra por nombre), creada al primer uso."""
+    if nombre not in _CLASES_XGB:
+        import xgboost  # noqa: PLC0415
+        _CLASES_XGB[nombre] = type(nombre, (_BalanceoAuto, getattr(xgboost, _NOMBRES_XGB[nombre])),
+                                   {"__module__": __name__, "__qualname__": nombre})
+    return _CLASES_XGB[nombre]
+
+
+def __getattr__(nombre: str):  # PEP 562: permite que pickle/cloudpickle resuelvan las clases XGB
+    if nombre in _NOMBRES_XGB:
+        return _clase_xgb(nombre)
+    raise AttributeError(f"module {__name__!r} has no attribute {nombre!r}")
+
+
 def construir_estimador(familia: str, params: dict | None = None, seed: int = SEMILLA):
     """Estimador sin preprocesamiento. Imports perezosos: cada familia trae su dependencia."""
     params = dict(params or {})
@@ -253,13 +291,16 @@ def construir_estimador(familia: str, params: dict | None = None, seed: int = SE
         return LogisticRegression(**({"max_iter": 1000, "class_weight": "balanced",
                                       "random_state": seed} | params))
     if familia == "bosque":
-        from sklearn.ensemble import RandomForestClassifier  # noqa: PLC0415
-        return RandomForestClassifier(**({"random_state": seed, "n_jobs": -1,
-                                          "class_weight": "balanced_subsample"} | params))
+        # Bagging: random forest de XGBoost en GPU (árboles completos sobre bootstrap de filas y un
+        # subconjunto aleatorio de columnas por nodo, promediados; sin boosting). Acepta NaN.
+        return _clase_xgb("XGBRFClassifierBalanceado")(**(
+            {"device": "cuda", "tree_method": "hist", "random_state": seed, "n_estimators": 300,
+             "max_depth": 12, "subsample": 0.632, "colsample_bynode": 0.1,
+             "scale_pos_weight": "balanced", "n_jobs": 16} | params))
     if familia == "xgboost":
-        from xgboost import XGBClassifier  # noqa: PLC0415
-        return XGBClassifier(**({"device": "cuda", "tree_method": "hist", "random_state": seed,
-                                 "eval_metric": "aucpr", "n_jobs": -1} | params))
+        return _clase_xgb("XGBClassifierBalanceado")(**(
+            {"device": "cuda", "tree_method": "hist", "random_state": seed, "eval_metric": "aucpr",
+             "scale_pos_weight": "balanced", "n_jobs": 16} | params))
     if familia == "mlp":
         return _mlp_skorch(params, seed)
     if familia == "tabpfn":
@@ -600,26 +641,34 @@ def evaluar_cv(familia_o_modelo, df: pd.DataFrame, columnas: list[str],
     splitter = splitter or EmbargoTimeSeriesSplit()
     base = (construir_modelo(familia_o_modelo, params, seed)
             if isinstance(familia_o_modelo, str) else familia_o_modelo)
-    X, y = df[columnas], df["TARGET_30D"].to_numpy()
+    # Con 100M filas no se copia df[columnas] entero (~170 GB): cada pliegue toma solo sus filas.
+    y = df["TARGET_30D"].to_numpy()
+    meta = df[["SSD_KEY", "OBSERVATION_DATE", "DAYS_TO_FAILURE", "TARGET_30D"]]
+    idx_cols = df.columns.get_indexer(columnas)
+
+    def X_de(pos):
+        return df.iloc[pos, idx_cols]
+
     cv, tr, ap, seg, oofs, modelo = [], [], [], [], [], None
     for i, (itr, iva) in enumerate(splitter.split(df, groups=df["OBSERVATION_DATE"])):
-        assert df["OBSERVATION_DATE"].iloc[itr].max() + pd.Timedelta(days=splitter.embargo_dias) \
-            < df["OBSERVATION_DATE"].iloc[iva].min(), "Embargo violado"
+        assert meta["OBSERVATION_DATE"].iloc[itr].max() + pd.Timedelta(days=splitter.embargo_dias) \
+            < meta["OBSERVATION_DATE"].iloc[iva].min(), "Embargo violado"
         if frac_sanos_train is not None:
-            itr = itr[muestra_por_disco(df.iloc[itr], frac_sanos_train, seed)]
+            itr = itr[muestra_por_disco(meta.iloc[itr], frac_sanos_train, seed)]
         modelo = clone(base)
         t0 = time.perf_counter()
-        modelo.fit(X.iloc[itr], y[itr])
+        modelo.fit(X_de(itr), y[itr])
         seg.append(time.perf_counter() - t0)
 
-        sv = _score(modelo, X.iloc[iva])
-        dv = df.iloc[iva]
+        sv = _score(modelo, X_de(iva))
+        dv = meta.iloc[iva]
         cv.append(curva_evento(dv["SSD_KEY"], dv["OBSERVATION_DATE"], dv["DAYS_TO_FAILURE"], sv).pr_auc)
         ap.append(average_precision_score(y[iva], sv) if y[iva].any() else np.nan)
 
-        itr_m = _muestra_discos(df.iloc[itr], max_filas_metrica_train, seed)
-        dt = df.iloc[itr].iloc[itr_m] if itr_m is not None else df.iloc[itr]
-        st = _score(modelo, dt[columnas])
+        itr_m = _muestra_discos(meta.iloc[itr], max_filas_metrica_train, seed)
+        pos_m = itr[itr_m] if itr_m is not None else itr
+        dt = meta.iloc[pos_m]
+        st = _score(modelo, X_de(pos_m))
         tr.append(curva_evento(dt["SSD_KEY"], dt["OBSERVATION_DATE"], dt["DAYS_TO_FAILURE"], st).pr_auc)
 
         oofs.append(pd.DataFrame({"SSD_KEY": dv["SSD_KEY"].to_numpy(),
@@ -715,8 +764,11 @@ def registrar_corrida(*, nombre: str, fase: str, familia: str, modelo, seed: int
         if registrar_modelo:
             ejemplo = X_ejemplo.head(5)
             firma = infer_signature(ejemplo, _score(modelo, ejemplo))
+            # code_paths: el modelo lleva src/ consigo (clases propias del pipeline), así
+            # models:/...@champion se carga en cualquier entorno con las mismas dependencias.
             mlflow.sklearn.log_model(modelo, name="pipeline", signature=firma, input_example=ejemplo,
-                                     serialization_format="cloudpickle")
+                                     serialization_format="cloudpickle",
+                                     code_paths=[os.path.dirname(os.path.abspath(__file__))])
         return run.info.run_id
 
 
