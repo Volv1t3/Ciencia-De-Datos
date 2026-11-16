@@ -133,9 +133,11 @@ def construir_preprocesador(familia: str) -> Pipeline:
         return Pipeline([("derivadas", FeaturesDerivadas(salida="numpy"))])
     pasos = [("derivadas", FeaturesDerivadas())]
     if familia in {"logistica", "sin_temporales", "mlp", "tabpfn"}:
+        # TabPFN admite como máximo 500 features: sin los ~150 indicadores de faltante queda en ~420.
+        indicador = familia != "tabpfn"
         numericas = Pipeline([
             ("log1p", FunctionTransformer(_log1p_con_signo, feature_names_out="one-to-one")),
-            ("imputar", SimpleImputer(strategy="median", add_indicator=True, keep_empty_features=False)),
+            ("imputar", SimpleImputer(strategy="median", add_indicator=indicador, keep_empty_features=False)),
             ("escalar", StandardScaler()),
         ])
         selector = (make_column_selector(pattern=PATRON_VALOR_DIA)
@@ -209,35 +211,8 @@ class ConSubmuestra(BaseEstimator, ClassifierMixin):
 
 
 def _mlp_skorch(params: dict, seed: int):
-    import torch  # noqa: PLC0415
-    from skorch import NeuralNetBinaryClassifier  # noqa: PLC0415
-
-    class MLP(torch.nn.Module):
-        def __init__(self, n_entrada=-1, ocultas=(256, 128), dropout=0.1):
-            super().__init__()
-            capas, previo = [], n_entrada
-            for h in ocultas:
-                capas += [torch.nn.LazyLinear(h) if previo < 0 else torch.nn.Linear(previo, h),
-                          torch.nn.ReLU(), torch.nn.Dropout(dropout)]
-                previo = h
-            capas.append(torch.nn.Linear(previo, 1))
-            self.red = torch.nn.Sequential(*capas)
-
-        def forward(self, X):
-            return self.red(X).squeeze(-1)
-
-    torch.manual_seed(seed)
-    p = {"ocultas": (256, 128), "dropout": 0.1, "lr": 1e-3, "weight_decay": 1e-5,
-         "max_epochs": 10, "batch_size": 8192, "pos_weight": 50.0} | params
-    return NeuralNetBinaryClassifier(
-        MLP, module__ocultas=tuple(p["ocultas"]), module__dropout=p["dropout"],
-        criterion=torch.nn.BCEWithLogitsLoss,
-        criterion__pos_weight=torch.tensor(p["pos_weight"]),
-        optimizer=torch.optim.AdamW, optimizer__weight_decay=p["weight_decay"],
-        lr=p["lr"], max_epochs=p["max_epochs"], batch_size=p["batch_size"],
-        iterator_train__shuffle=True, train_split=None, verbose=0,
-        device="cuda" if torch.cuda.is_available() else "cpu",
-    )
+    from src.mlp import construir_mlp  # noqa: PLC0415 - importa torch solo para esta familia
+    return construir_mlp(params, seed)
 
 
 def _hay_cuml() -> bool:

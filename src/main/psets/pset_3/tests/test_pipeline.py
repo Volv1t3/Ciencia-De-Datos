@@ -191,6 +191,24 @@ def test_xgb_balanceado_pickle_y_clone(df, familia):
     assert clone(m).named_steps["modelo"].get_params()["scale_pos_weight"] == "balanced"
 
 
+def test_mlp_entrena_con_etiqueta_entera_y_hace_pickle(df):
+    pytest.importorskip("skorch")
+    import pickle
+    cols = pl.columnas_modelo(df, "R")
+    m = pl.construir_modelo("mlp", {"max_epochs": 1, "batch_size": 1024})
+    m.fit(df[cols], df["TARGET_30D"].astype(np.int8))           # como llega desde la caché
+    p = m.predict_proba(df[cols])[:, 1]
+    assert p.shape == (len(df),) and np.isfinite(p).all()
+    m2 = pickle.loads(pickle.dumps(m))
+    assert np.allclose(m2.predict_proba(df[cols])[:, 1], p, atol=1e-6)
+
+
+def test_tabpfn_no_supera_500_features(df):
+    cols = pl.columnas_modelo(df, "R")
+    salida = pl.construir_preprocesador("tabpfn").fit_transform(df[cols])
+    assert salida.shape[1] <= 500
+
+
 def test_prep_reutilizable_y_orden_de_filas_irrelevante(df):
     s = df["R_5"].to_numpy()
     prep = pl.preparar_eventos(df["SSD_KEY"], df["OBSERVATION_DATE"], df["DAYS_TO_FAILURE"])
