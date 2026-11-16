@@ -46,7 +46,9 @@ COLUMNAS_PROHIBIDAS = frozenset({
 
 PATRON_VALOR_DIA = r"^[RN]_\d+$"  # valor del día, sin ventanas: baseline "sin features temporales"
 # Atributos SMART de error/desgaste presentes en MC1. La EDA (01_eda) confirma cuáles separan.
-ATRIBUTOS_CRITICOS_DEFECTO = (5, 171, 172, 183, 184, 187, 196, 197, 198, 199)
+# Atributos de desgaste/errores. Sin 196 ni 170: en la EDA (01) son copias exactas de 5 (Spearman = 1)
+# y se contarían dos veces. 206 es copia de 171 y tampoco se incluye.
+ATRIBUTOS_CRITICOS_DEFECTO = (5, 171, 172, 183, 184, 187, 197, 198, 199)
 FEATURE_DEGRADACION = "N_CRITICAL_DEGRADING_30D"
 
 
