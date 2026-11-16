@@ -401,16 +401,22 @@ class EventosPreparados:
     fecha: np.ndarray       # días (int64), ya ordenados
     dias: np.ndarray        # DAYS_TO_FAILURE (float64, NaN si no falla), ya ordenados
     eventos: int
+    peso_disco: np.ndarray | None = None  # un peso por disco (en el orden de `inicio`)
 
 
-def preparar_eventos(ssd, fecha, dias) -> EventosPreparados:
+def preparar_eventos(ssd, fecha, dias, peso=None) -> EventosPreparados:
+    """`peso` (opcional, por fila y constante dentro de cada disco): cuántos discos de la
+    población representa ese disco. Sirve para medir sobre una muestra de discos sanos sin
+    inflar la precisión: un disco sano muestreado al 15 % cuenta como 1/0,15 discos."""
     codigos = codigos_disco(ssd)
     f = dias_desde_epoca(fecha)
     orden = np.lexsort((f, codigos))
     c = codigos[orden]
     inicio = np.concatenate([[0], np.flatnonzero(np.diff(c)) + 1, [len(c)]]).astype(np.int64)
     d = np.asarray(dias, dtype=np.float64)
-    return EventosPreparados(orden, inicio, f[orden], d[orden], eventos_anticipables(codigos, dias))
+    peso_disco = None if peso is None else np.asarray(peso, dtype=np.float64)[orden][inicio[:-1]]
+    return EventosPreparados(orden, inicio, f[orden], d[orden], eventos_anticipables(codigos, dias),
+                             peso_disco)
 
 
 try:
@@ -420,27 +426,29 @@ except ImportError:  # pragma: no cover - numba viene con RAPIDS y en requiremen
 
 
 @njit(parallel=True, cache=True)
-def _contar_episodios(inicio, fecha, dias, score, umbrales, duracion, a_min, a_max):
-    """Para cada umbral: episodios abiertos, aciertos y alertas tardías (1-6 días)."""
+def _contar_episodios(inicio, fecha, dias, score, umbrales, duracion, a_min, a_max, peso_disco):
+    """Para cada umbral: episodios abiertos, aciertos y alertas tardías (1-6 días), ponderados
+    por el peso de cada disco (1 sin muestreo)."""
     t_n = len(umbrales)
-    alertas = np.zeros(t_n, np.int64)
-    aciertos = np.zeros(t_n, np.int64)
-    tardias = np.zeros(t_n, np.int64)
+    alertas = np.zeros(t_n, np.float64)
+    aciertos = np.zeros(t_n, np.float64)
+    tardias = np.zeros(t_n, np.float64)
     for k in prange(t_n):
         tau = umbrales[k]
-        a = 0
-        h = 0
-        tl = 0
+        a = 0.0
+        h = 0.0
+        tl = 0.0
         for d in range(len(inicio) - 1):
             libre_desde = -(1 << 62)
+            w = peso_disco[d]
             for i in range(inicio[d], inicio[d + 1]):
                 if score[i] >= tau and fecha[i] >= libre_desde:
-                    a += 1
+                    a += w
                     x = dias[i]
                     if x >= a_min and x <= a_max:
-                        h += 1
+                        h += w
                     elif x >= 1 and x < a_min:
-                        tl += 1
+                        tl += w
                     libre_desde = fecha[i] + duracion
         alertas[k] = a
         aciertos[k] = h
@@ -452,9 +460,10 @@ def _contar(prep: EventosPreparados, score, umbrales, episodio_dias):
     s = np.asarray(score, dtype=np.float64)[prep.orden]
     s = np.where(np.isnan(s), -np.inf, s)  # sin score -> nunca alerta
     duracion = _SIN_REPETICION if episodio_dias is None else int(episodio_dias)
+    peso = prep.peso_disco if prep.peso_disco is not None else np.ones(len(prep.inicio) - 1)
     return _contar_episodios(prep.inicio, prep.fecha, prep.dias, s,
                              np.asarray(umbrales, dtype=np.float64), duracion,
-                             ANTICIPACION_MIN, ANTICIPACION_MAX)
+                             ANTICIPACION_MIN, ANTICIPACION_MAX, peso)
 
 
 def _umbrales(score, n: int) -> np.ndarray:
@@ -526,7 +535,7 @@ def metricas_evento(ssd, fecha, dias, score, tau: float, beta: float = 0.5,
     """Precisión, recall y F-beta por evento en un umbral tau (operación)."""
     prep = prep or preparar_eventos(ssd, fecha, dias)
     a, h, tl = _contar(prep, score, [tau], episodio_dias)
-    n_alertas, tp, eventos = int(a[0]), int(h[0]), prep.eventos
+    n_alertas, tp, eventos = int(round(a[0])), int(round(h[0])), prep.eventos
     precision = tp / n_alertas if n_alertas else 0.0
     recall = tp / eventos if eventos else 0.0
     b2 = beta ** 2
@@ -629,7 +638,8 @@ def evaluar_cv(familia_o_modelo, df: pd.DataFrame, columnas: list[str],
     así que la métrica no se sesga; solo cambia la prevalencia vista al entrenar (los scores
     quedan inflados, pero tau se elige sobre las predicciones de validación, no en 0,5).
     La métrica de entrenamiento se calcula sobre lo que el modelo vio, o sobre una muestra
-    determinista por disco si supera `max_filas_metrica_train`.
+    determinista por disco si supera `max_filas_metrica_train`; en ambos casos los discos sanos
+    se ponderan por la inversa de la fracción muestreada, para que sea comparable con la CV.
     Devuelve también el modelo del último pliegue (el entrenado con más datos).
     """
     verificar_sin_fuga(columnas)
@@ -648,6 +658,7 @@ def evaluar_cv(familia_o_modelo, df: pd.DataFrame, columnas: list[str],
     for i, (itr, iva) in enumerate(splitter.split(df, groups=df["OBSERVATION_DATE"])):
         assert meta["OBSERVATION_DATE"].iloc[itr].max() + pd.Timedelta(days=splitter.embargo_dias) \
             < meta["OBSERVATION_DATE"].iloc[iva].min(), "Embargo violado"
+        sanos_pliegue = _discos_sanos(meta.iloc[itr])  # para ponderar la métrica de train
         if frac_sanos_train is not None:
             itr = itr[muestra_por_disco(meta.iloc[itr], frac_sanos_train, seed)]
         modelo = clone(base)
@@ -664,7 +675,12 @@ def evaluar_cv(familia_o_modelo, df: pd.DataFrame, columnas: list[str],
         pos_m = itr[itr_m] if itr_m is not None else itr
         dt = meta.iloc[pos_m]
         st = _score(modelo, X_de(pos_m))
-        tr.append(curva_evento(dt["SSD_KEY"], dt["OBSERVATION_DATE"], dt["DAYS_TO_FAILURE"], st).pr_auc)
+        # Los discos sanos de la muestra representan a todos los sanos del pliegue: sin este peso
+        # la precisión de train sale inflada (hay menos falsas alarmas posibles) y la brecha
+        # train−CV exageraría el sobreajuste de cualquier modelo, incluso del dummy.
+        peso = _peso_sanos(dt, sanos_pliegue)
+        prep_t = preparar_eventos(dt["SSD_KEY"], dt["OBSERVATION_DATE"], dt["DAYS_TO_FAILURE"], peso)
+        tr.append(curva_evento(None, None, None, st, prep=prep_t).pr_auc)
 
         oofs.append(pd.DataFrame({"SSD_KEY": dv["SSD_KEY"].values,  # categórica si viene de la caché
                                   "OBSERVATION_DATE": dv["OBSERVATION_DATE"].to_numpy(),
@@ -696,6 +712,21 @@ def _hash_disco(ssd: pd.Series, seed: int) -> np.ndarray:
         hc = pd.util.hash_pandas_object(pd.Series(ssd.cat.categories), index=False, hash_key=clave).to_numpy()
         return hc[ssd.cat.codes.to_numpy()]
     return pd.util.hash_pandas_object(pd.Series(np.asarray(ssd)), index=False, hash_key=clave).to_numpy()
+
+
+def _discos_sanos(d: pd.DataFrame) -> int:
+    """Discos sin ninguna fila positiva (mismo criterio que `muestra_por_disco`)."""
+    codigos = codigos_disco(d["SSD_KEY"])
+    fallan = np.unique(codigos[d["TARGET_30D"].to_numpy() == 1])
+    return int(np.unique(codigos).size - fallan.size)
+
+
+def _peso_sanos(muestra: pd.DataFrame, sanos_poblacion: int) -> np.ndarray:
+    """Peso por fila: 1 en discos que fallan; sanos_población / sanos_muestra en los sanos."""
+    codigos = codigos_disco(muestra["SSD_KEY"])
+    es_falla = np.isin(codigos, np.unique(codigos[muestra["TARGET_30D"].to_numpy() == 1]))
+    sanos_muestra = max(int(np.unique(codigos[~es_falla]).size), 1)
+    return np.where(es_falla, 1.0, sanos_poblacion / sanos_muestra)
 
 
 def _muestra_discos(d: pd.DataFrame, max_filas: int | None, seed: int):

@@ -247,6 +247,34 @@ def test_experimentos_registra_en_mlflow_y_reutiliza(df, tmp_path):
     assert set(exp.resultados(ctx.oof_dir)) == {"dummy"}
 
 
+def test_peso_de_disco_equivale_a_duplicarlo(df):
+    rng = np.random.default_rng(5)
+    d = df.assign(score=rng.random(len(df)))
+    sanos = set(d["SSD_KEY"]) - set(d.loc[d["TARGET_30D"] == 1, "SSD_KEY"])
+    copia = d[d["SSD_KEY"].isin(sanos)].assign(SSD_KEY=lambda x: x["SSD_KEY"] + "_copia")
+    duplicado = pd.concat([d, copia])
+    a = pl.curva_evento(duplicado["SSD_KEY"], duplicado["OBSERVATION_DATE"], duplicado["DAYS_TO_FAILURE"],
+                        duplicado["score"])
+    peso = np.where(d["SSD_KEY"].isin(sanos), 2.0, 1.0)
+    prep = pl.preparar_eventos(d["SSD_KEY"], d["OBSERVATION_DATE"], d["DAYS_TO_FAILURE"], peso)
+    b = pl.curva_evento(None, None, None, d["score"], prep=prep)
+    umbral = a.umbrales[len(a.umbrales) // 2]   # comparar en un umbral común
+    ma = pl.metricas_evento(duplicado["SSD_KEY"], duplicado["OBSERVATION_DATE"], duplicado["DAYS_TO_FAILURE"],
+                            duplicado["score"], umbral)
+    mb = pl.metricas_evento(None, None, None, d["score"], umbral, prep=prep)
+    assert ma["alertas"] == mb["alertas"] and ma["aciertos"] == mb["aciertos"]
+    assert b.pr_auc == pytest.approx(a.pr_auc, rel=0.05)
+
+
+def test_metrica_train_no_se_infla_con_submuestra_de_sanos(df):
+    cols = pl.columnas_modelo(df, "R")
+    sp = pl.EmbargoTimeSeriesSplit(n_splits=2, meses_validacion=2)
+    completo, _ = pl.evaluar_cv("dummy", df, cols, sp)
+    sub, _ = pl.evaluar_cv("dummy", df, cols, sp, frac_sanos_train=0.25)
+    # el dummy no aprende: su "train" con pesos debe parecerse al de la población completa
+    assert sub.resumen["train_pr_auc_evento"] == pytest.approx(completo.resumen["train_pr_auc_evento"], rel=0.5)
+
+
 def test_prep_reutilizable_y_orden_de_filas_irrelevante(df):
     s = df["R_5"].to_numpy()
     prep = pl.preparar_eventos(df["SSD_KEY"], df["OBSERVATION_DATE"], df["DAYS_TO_FAILURE"])
