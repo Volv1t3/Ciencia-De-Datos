@@ -95,6 +95,42 @@ services:
               device_ids: ["${GPU_IDS_0:-0}", "${GPU_IDS_1:-1}"]
               capabilities: [gpu]
 
+  # Trabajador extra, sin Jupyter: misma imagen y montajes que jupyter-gpu, pero con otra GPU.
+  # Sirve para correr scripts (p. ej. tuning) en paralelo sin reiniciar jupyter-gpu. Solo se
+  # levanta a pedido y se apaga al terminar (servidor compartido):
+  #   docker compose --profile extra up -d trabajador-extra
+  #   docker compose exec -d trabajador-extra python scripts/...
+  #   docker compose --profile extra stop trabajador-extra
+  trabajador-extra:
+    image: fteran-pset3-jupyter-gpu
+    profiles: ["extra"]
+    depends_on:
+      mlflow:
+        condition: service_healthy
+    env_file: .env
+    user: "${HOST_UID:?set HOST_UID in .env (id -u)}:1001"
+    environment:
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      DATOS_DIR: /datos
+      PYTHONHASHSEED: "0"
+      HOME: /tmp/home
+      LD_PRELOAD: /opt/conda/lib/python3.12/site-packages/nvidia/nccl/lib/libnccl.so.2
+      TABPFN_MODEL_PATH: /datos/modelos/tabpfn/tabpfn-v3.5-fast-20260909.safetensors
+      TABPFN_NO_BROWSER: "1"
+    working_dir: /repo/src/main/psets/pset_3
+    volumes:
+      - ../../../..:/repo
+      - ${DATOS_DIR_HOST:?set DATOS_DIR_HOST in .env}:/datos
+    shm_size: 64gb
+    command: sleep infinity
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${GPU_ID_EXTRA:-2}"]
+              capabilities: [gpu]
+
 volumes:
   mlflow_postgres_data:
   mlflow_artifacts:
