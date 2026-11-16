@@ -41,8 +41,10 @@ class MLPBinaria(NeuralNetBinaryClassifier):
 
 def construir_mlp(params: dict, seed: int) -> MLPBinaria:
     torch.manual_seed(seed)
-    p = {"ocultas": (256, 128), "dropout": 0.1, "lr": 1e-3, "weight_decay": 1e-5,
-         "max_epochs": 10, "batch_size": 8192, "pos_weight": 50.0} | params
+    # Lotes grandes: con 8.192 filas por lote la GPU esperaba a la CPU (40 min por pliegue con
+    # 10 épocas). Con 32.768 hay 4× menos lotes; lr algo mayor para compensar.
+    p = {"ocultas": (256, 128), "dropout": 0.1, "lr": 2e-3, "weight_decay": 1e-5,
+         "max_epochs": 6, "batch_size": 32768, "pos_weight": 50.0} | params
     return MLPBinaria(
         RedMLP, module__ocultas=tuple(p["ocultas"]), module__dropout=p["dropout"],
         criterion=torch.nn.BCEWithLogitsLoss,
