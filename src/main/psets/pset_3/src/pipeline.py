@@ -18,6 +18,7 @@ Definiciones comprometidas en el PSet #1 (memo Perla_Guaman_Teran_Arellano, secc
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import time
 from dataclasses import dataclass, field
@@ -117,8 +118,130 @@ def _log1p_con_signo(x):
 
 
 def _a_float32(a):
-    """skorch/torch esperan float32."""
+    """torch y TabPFN esperan float32."""
     return np.asarray(a, dtype=np.float32)
+
+
+# --------------------------------------------------------------------------------------------
+# Preprocesamiento numérico en paralelo (equivale a log1p con signo -> SimpleImputer(median,
+# add_indicator) -> StandardScaler de scikit-learn, que corren en un solo hilo)
+# --------------------------------------------------------------------------------------------
+import numba  # noqa: E402
+from numba import njit as _njit, prange as _prange  # noqa: E402
+
+numba.set_num_threads(min(int(os.getenv("PSET3_HILOS", "32")), numba.config.NUMBA_NUM_THREADS))
+
+
+@_njit(inline="always")
+def _log1p_signo_escalar(x):
+    if x > 0:
+        return np.log1p(x)
+    if x < 0:
+        return -np.log1p(-x)
+    return 0.0
+
+
+@_njit(parallel=True, cache=True)
+def _estadisticas_columnas(X):
+    """Por columna: mediana del valor transformado (sin NaN), media y varianza tras imputar,
+    y fracción de faltantes. Columnas sin ningún dato: mediana NaN."""
+    n, p = X.shape
+    med = np.full(p, np.nan)
+    media = np.zeros(p)
+    var = np.zeros(p)
+    frac_nan = np.zeros(p)
+    for j in _prange(p):
+        v = np.empty(n)
+        k = 0
+        for i in range(n):
+            x = X[i, j]
+            if not np.isnan(x):
+                v[k] = _log1p_signo_escalar(x)
+                k += 1
+        frac_nan[j] = (n - k) / n
+        if k == 0:
+            continue
+        m = np.median(v[:k])
+        med[j] = m
+        s = 0.0
+        for i in range(k):
+            s += v[i]
+        mu = (s + (n - k) * m) / n
+        ss = 0.0
+        for i in range(k):
+            d = v[i] - mu
+            ss += d * d
+        ss += (n - k) * (m - mu) * (m - mu)
+        media[j] = mu
+        var[j] = ss / n
+    return med, media, var, frac_nan
+
+
+@_njit(parallel=True, cache=True)
+def _transformar_columnas(X, cols, med, media, escala, cols_ind, media_ind, escala_ind):
+    n = X.shape[0]
+    k, m = len(cols), len(cols_ind)
+    out = np.empty((n, k + m), dtype=np.float32)
+    for jj in _prange(k + m):
+        if jj < k:
+            c = cols[jj]
+            for i in range(n):
+                x = X[i, c]
+                v = med[c] if np.isnan(x) else _log1p_signo_escalar(x)
+                out[i, jj] = (v - media[jj]) / escala[jj]
+        else:
+            c = cols_ind[jj - k]
+            for i in range(n):
+                v = 1.0 if np.isnan(X[i, c]) else 0.0
+                out[i, jj] = (v - media_ind[jj - k]) / escala_ind[jj - k]
+    return out
+
+
+class PreprocesadorNumerico(BaseEstimator, TransformerMixin):
+    """log1p con signo -> imputación por mediana (+ indicador de faltante) -> escalado estándar.
+
+    Mismo resultado que el Pipeline de scikit-learn equivalente (prueba en tests/), pero compilado
+    con numba y en paralelo por columnas (PSET3_HILOS hilos, 32 por defecto: servidor compartido).
+    Con 14M filas × 480 columnas, scikit-learn tardaba decenas de minutos por pliegue en un hilo.
+    Como SimpleImputer(keep_empty_features=False), descarta las columnas sin ningún dato; el
+    indicador se agrega para toda columna con faltantes en el ajuste, y también se escala.
+    """
+
+    def __init__(self, add_indicator: bool = True):
+        self.add_indicator = add_indicator
+
+    def fit(self, X, y=None):
+        nombres = np.asarray(getattr(X, "columns", [f"x{j}" for j in range(np.shape(X)[1])]), dtype=object)
+        A = np.asarray(X, dtype=np.float32)
+        med, media, var, frac_nan = _estadisticas_columnas(A)
+        self.cols_ = np.flatnonzero(~np.isnan(med)).astype(np.int64)
+        self.cols_ind_ = (np.flatnonzero(frac_nan > 0).astype(np.int64) if self.add_indicator
+                          else np.zeros(0, np.int64))
+        self.mediana_ = med
+        self.media_ = media[self.cols_]
+        self.escala_ = _escala_estandar(var[self.cols_])
+        f = frac_nan[self.cols_ind_]
+        self.media_ind_ = f
+        self.escala_ind_ = _escala_estandar(f * (1 - f))
+        self.feature_names_in_ = nombres
+        self.n_features_in_ = A.shape[1]
+        return self
+
+    def transform(self, X):
+        A = np.asarray(X, dtype=np.float32)
+        return _transformar_columnas(A, self.cols_, self.mediana_, self.media_, self.escala_,
+                                     self.cols_ind_, self.media_ind_, self.escala_ind_)
+
+    def get_feature_names_out(self, input_features=None):
+        n = self.feature_names_in_
+        return np.concatenate([n[self.cols_], np.array([f"missingindicator_{c}" for c in n[self.cols_ind_]],
+                                                       dtype=object)])
+
+
+def _escala_estandar(var):
+    """Como StandardScaler: desviación estándar, y 1 donde la varianza es ~0."""
+    s = np.sqrt(np.asarray(var, dtype=np.float64))
+    return np.where(s < 10 * np.finfo(np.float64).eps, 1.0, s)
 
 
 def construir_preprocesador(familia: str) -> Pipeline:
@@ -137,11 +260,8 @@ def construir_preprocesador(familia: str) -> Pipeline:
         # scripts/medir_tabpfn.py; los indicadores agregan ~100 columnas casi constantes y alargan
         # la predicción, que es el cuello de botella de esta familia.
         indicador = familia != "tabpfn"
-        numericas = Pipeline([
-            ("log1p", FunctionTransformer(_log1p_con_signo, feature_names_out="one-to-one")),
-            ("imputar", SimpleImputer(strategy="median", add_indicator=indicador, keep_empty_features=False)),
-            ("escalar", StandardScaler()),
-        ])
+        # log1p con signo -> mediana (+ indicador) -> escala estándar, en paralelo (numba)
+        numericas = PreprocesadorNumerico(add_indicator=indicador)
         selector = (make_column_selector(pattern=PATRON_VALOR_DIA)
                     if familia == "sin_temporales" else make_column_selector(dtype_include=np.number))
         pasos.append(("columnas", ColumnTransformer([("num", numericas, selector)],
@@ -632,7 +752,8 @@ def evaluar_cv(familia_o_modelo, df: pd.DataFrame, columnas: list[str],
                splitter: EmbargoTimeSeriesSplit | None = None, params: dict | None = None,
                seed: int = SEMILLA, al_terminar_pliegue: Callable[[int, float], None] | None = None,
                max_filas_metrica_train: int | None = 5_000_000,
-               frac_sanos_train: float | None = None) -> tuple[ResultadoCV, object]:
+               frac_sanos_train: float | None = None,
+               cache_prep: dict | None = None) -> tuple[ResultadoCV, object]:
     """CV propia (no cross_val_score): la métrica por evento necesita SSD_KEY, fecha y DAYS_TO_FAILURE.
 
     `al_terminar_pliegue(i, valor)` permite a Optuna podar (lanza optuna.TrialPruned).
@@ -643,6 +764,10 @@ def evaluar_cv(familia_o_modelo, df: pd.DataFrame, columnas: list[str],
     La métrica de entrenamiento se calcula sobre lo que el modelo vio, o sobre una muestra
     determinista por disco si supera `max_filas_metrica_train`; en ambos casos los discos sanos
     se ponderan por la inversa de la fracción muestreada, para que sea comparable con la CV.
+    `cache_prep` (tuning): dict donde se guarda, por pliegue, el paso "prep" ya ajustado y las
+    matrices transformadas. El preprocesamiento no depende de los hiperparámetros del modelo y se
+    ajusta solo con el pliegue de entrenamiento, así que reutilizarlo entre configuraciones da el
+    mismo resultado sin repetir el trabajo.
     Devuelve también el modelo del último pliegue (el entrenado con más datos).
     """
     verificar_sin_fuga(columnas)
@@ -664,20 +789,37 @@ def evaluar_cv(familia_o_modelo, df: pd.DataFrame, columnas: list[str],
         sanos_pliegue = _discos_sanos(meta.iloc[itr])  # para ponderar la métrica de train
         if frac_sanos_train is not None:
             itr = itr[muestra_por_disco(meta.iloc[itr], frac_sanos_train, seed)]
-        modelo = clone(base)
-        t0 = time.perf_counter()
-        modelo.fit(X_de(itr), y[itr])
-        seg.append(time.perf_counter() - t0)
+        itr_m = _muestra_discos(meta.iloc[itr], max_filas_metrica_train, seed)
+        pos_m = itr[itr_m] if itr_m is not None else itr
 
-        sv = _score(modelo, X_de(iva))
+        if cache_prep is not None and isinstance(base, Pipeline) and "prep" in base.named_steps:
+            # repr sin direcciones de memoria (make_column_selector imprime "at 0x...")
+            firma = re.sub(r" at 0x[0-9a-fA-F]+", "", repr(base.named_steps["prep"]))
+            clave = (i, len(itr), len(iva), int(itr[0]) if len(itr) else -1, firma)
+            if clave not in cache_prep:
+                prep_i = clone(base.named_steps["prep"]).fit(X_de(itr), y[itr])
+                cache_prep[clave] = (prep_i, prep_i.transform(X_de(itr)), prep_i.transform(X_de(iva)))
+            prep_i, Xtr_t, Xva_t = cache_prep[clave]
+            estimador = clone(base.named_steps["modelo"])
+            t0 = time.perf_counter()
+            estimador.fit(Xtr_t, y[itr])
+            seg.append(time.perf_counter() - t0)
+            modelo = Pipeline([("prep", prep_i), ("modelo", estimador)])
+            sv = _score(estimador, Xva_t)
+            st = _score(estimador, Xtr_t[itr_m] if itr_m is not None else Xtr_t)
+        else:
+            modelo = clone(base)
+            t0 = time.perf_counter()
+            modelo.fit(X_de(itr), y[itr])
+            seg.append(time.perf_counter() - t0)
+            sv = _score(modelo, X_de(iva))
+            st = _score(modelo, X_de(pos_m))
+
         dv = meta.iloc[iva]
         cv.append(curva_evento(dv["SSD_KEY"], dv["OBSERVATION_DATE"], dv["DAYS_TO_FAILURE"], sv).pr_auc)
         ap.append(average_precision_score(y[iva], sv) if y[iva].any() else np.nan)
 
-        itr_m = _muestra_discos(meta.iloc[itr], max_filas_metrica_train, seed)
-        pos_m = itr[itr_m] if itr_m is not None else itr
         dt = meta.iloc[pos_m]
-        st = _score(modelo, X_de(pos_m))
         # Los discos sanos de la muestra representan a todos los sanos del pliegue: sin este peso
         # la precisión de train sale inflada (hay menos falsas alarmas posibles) y la brecha
         # train−CV exageraría el sobreajuste de cualquier modelo, incluso del dummy.

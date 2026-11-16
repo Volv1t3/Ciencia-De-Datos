@@ -21,6 +21,11 @@ import numpy as np
 from src import experimentos as exp, pipeline as pl
 
 N_TRIALS = 30
+# Familias con preprocesamiento caro (log1p + imputación + escala sobre ~14M × 480 por pliegue):
+# se ajusta una vez por pliegue y se reutiliza en todas sus configuraciones (pipeline.evaluar_cv).
+# Los árboles reciben la matriz casi sin transformar y no lo necesitan (ahorra ~150 GB de RAM).
+FAMILIAS_CON_CACHE = {"mlp", "logistica"}
+_CACHE_PREP: dict = {}
 
 
 def _xgboost(t):
@@ -118,7 +123,8 @@ def _objetivo(trial, ctx: exp.Contexto, familia: str) -> float:
     try:
         res, ultimo = pl.evaluar_cv(familia, ctx.train, ctx.columnas, ctx.splitter, dict(params),
                                     seed=ctx.seed, frac_sanos_train=ctx.frac_sanos,
-                                    al_terminar_pliegue=reportar)
+                                    al_terminar_pliegue=reportar,
+                                    cache_prep=_CACHE_PREP if familia in FAMILIAS_CON_CACHE else None)
     except optuna.TrialPruned:
         _registrar_podado(ctx, familia, nombre, trial, params, acumulado)
         raise

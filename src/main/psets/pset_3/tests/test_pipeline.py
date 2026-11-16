@@ -297,6 +297,42 @@ def test_tuning_corridas_anidadas_y_retoma(df, tmp_path):
     assert len(st2.trials) == 3 and st2.user_attrs["mlflow_run_padre"] == padre
 
 
+@pytest.mark.parametrize("indicador", [True, False])
+def test_preprocesador_numerico_igual_a_sklearn(indicador):
+    from sklearn.impute import SimpleImputer
+    from sklearn.pipeline import Pipeline
+    from sklearn.preprocessing import FunctionTransformer, StandardScaler
+    rng = np.random.default_rng(0)
+    X = rng.lognormal(0, 3, size=(5000, 8)) * rng.choice([-1, 1], size=(5000, 8))
+    X[rng.random(X.shape) < 0.2] = np.nan
+    X[:, 3] = np.nan                       # columna sin datos: se descarta
+    X[:, 5] = np.where(np.isnan(X[:, 5]), 7.0, X[:, 5])  # sin faltantes: no lleva indicador
+    X[:, 6] = 2.5                          # constante: escala 1
+    X = pd.DataFrame(X.astype(np.float32), columns=[f"c{j}" for j in range(8)])
+    ref = Pipeline([("log1p", FunctionTransformer(pl._log1p_con_signo, feature_names_out="one-to-one")),
+                    ("imputar", SimpleImputer(strategy="median", add_indicator=indicador, keep_empty_features=False)),
+                    ("escalar", StandardScaler())]).fit(X)
+    nuevo = pl.PreprocesadorNumerico(add_indicator=indicador).fit(X)
+    a, b = ref.transform(X), nuevo.transform(X)
+    assert a.shape == b.shape
+    assert np.allclose(a, b, atol=1e-4)
+    Xn = X.sample(frac=1.0, random_state=1)  # datos nuevos (orden distinto): mismas estadísticas
+    assert np.allclose(ref.transform(Xn), nuevo.transform(Xn), atol=1e-4)
+
+
+def test_cache_de_preprocesamiento_da_el_mismo_resultado(df):
+    cols = pl.columnas_modelo(df, "R")
+    sp = pl.EmbargoTimeSeriesSplit(n_splits=2, meses_validacion=2)
+    sin, _ = pl.evaluar_cv("logistica", df, cols, sp, frac_sanos_train=0.5)
+    cache = {}
+    con, modelo = pl.evaluar_cv("logistica", df, cols, sp, frac_sanos_train=0.5, cache_prep=cache)
+    assert len(cache) == 2
+    assert np.allclose(con.cv_pliegues, sin.cv_pliegues) and np.allclose(con.train_pliegues, sin.train_pliegues)
+    otra, _ = pl.evaluar_cv("logistica", df, cols, sp, {"C": 0.1}, frac_sanos_train=0.5, cache_prep=cache)
+    assert len(cache) == 2                                  # reutiliza: no agrega entradas
+    assert modelo.predict_proba(df[cols]).shape == (len(df), 2)   # el Pipeline devuelto es completo
+
+
 def test_prep_reutilizable_y_orden_de_filas_irrelevante(df):
     s = df["R_5"].to_numpy()
     prep = pl.preparar_eventos(df["SSD_KEY"], df["OBSERVATION_DATE"], df["DAYS_TO_FAILURE"])
