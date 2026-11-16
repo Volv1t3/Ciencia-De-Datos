@@ -66,6 +66,9 @@ services:
     environment:
       MLFLOW_TRACKING_URI: http://mlflow:5000
       DATOS_DIR: /datos
+      # Pesos de TabPFN-3.5-Fast fijados (descargados una vez junto a los datos; SHA-256 en el README)
+      TABPFN_MODEL_PATH: /datos/modelos/tabpfn/tabpfn-v3.5-fast-20260909.safetensors
+      TABPFN_NO_BROWSER: "1"
       PYTHONHASHSEED: "0"
       HOME: /tmp/home
       # torch (pip) trae NCCL 2.30 y RAPIDS (conda) NCCL 2.27. Si cuML se importa antes que

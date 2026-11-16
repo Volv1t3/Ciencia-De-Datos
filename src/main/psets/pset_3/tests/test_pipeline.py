@@ -227,6 +227,26 @@ def test_llm_no_ve_etiquetas_y_usa_cache(df, tmp_path):
     assert np.allclose(r.probabilidades, [0.1, 0.9, 0.5])
 
 
+def test_experimentos_registra_en_mlflow_y_reutiliza(df, tmp_path):
+    mlflow = pytest.importorskip("mlflow")
+    pytest.importorskip("sqlalchemy")  # backend sqlite de MLflow (está en el contenedor)
+    from src import experimentos as exp
+    mlflow.set_tracking_uri(f"sqlite:///{(tmp_path / 'mlflow.db').as_posix()}")
+    mlflow.set_experiment(mlflow.create_experiment("prueba", artifact_location=(tmp_path / "art").as_uri()))
+    ctx = exp.Contexto(train=df, columnas=pl.columnas_modelo(df, "R"),
+                       splitter=pl.EmbargoTimeSeriesSplit(n_splits=2, meses_validacion=2),
+                       oof_dir=tmp_path / "oof", meta_datos={"datos_sha256": "abc"}, variante="R")
+    ctx.oof_dir.mkdir()
+    r = exp.correr(ctx, "dummy", "baseline", "dummy")
+    assert (ctx.oof_dir / "dummy.parquet").exists() and len(r["cv_pliegues"]) == 2
+    assert exp.correr(ctx, "dummy", "baseline", "dummy")["run_id"] == r["run_id"]   # no re-entrena
+    run = mlflow.get_run(r["run_id"])
+    assert run.data.tags["fase"] == "baseline" and run.data.tags["familia"] == "dummy"
+    assert run.data.params["semilla"] == str(pl.SEMILLA) and run.data.params["datos_sha256"] == "abc"
+    assert "cv_pr_auc_evento_media" in run.data.metrics and "cv_pr_auc_evento_std" in run.data.metrics
+    assert set(exp.resultados(ctx.oof_dir)) == {"dummy"}
+
+
 def test_prep_reutilizable_y_orden_de_filas_irrelevante(df):
     s = df["R_5"].to_numpy()
     prep = pl.preparar_eventos(df["SSD_KEY"], df["OBSERVATION_DATE"], df["DAYS_TO_FAILURE"])

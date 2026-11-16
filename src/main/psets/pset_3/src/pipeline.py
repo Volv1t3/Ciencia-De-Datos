@@ -133,7 +133,9 @@ def construir_preprocesador(familia: str) -> Pipeline:
         return Pipeline([("derivadas", FeaturesDerivadas(salida="numpy"))])
     pasos = [("derivadas", FeaturesDerivadas())]
     if familia in {"logistica", "sin_temporales", "mlp", "tabpfn"}:
-        # TabPFN admite como máximo 500 features: sin los ~150 indicadores de faltante queda en ~420.
+        # TabPFN: sin indicadores de faltante (413 features). Es la configuración medida en
+        # scripts/medir_tabpfn.py; los indicadores agregan ~100 columnas casi constantes y alargan
+        # la predicción, que es el cuello de botella de esta familia.
         indicador = familia != "tabpfn"
         numericas = Pipeline([
             ("log1p", FunctionTransformer(_log1p_con_signo, feature_names_out="one-to-one")),
@@ -181,12 +183,12 @@ class ReglaUmbralSMART(BaseEstimator, ClassifierMixin):
 class ConSubmuestra(BaseEstimator, ClassifierMixin):
     """Entrena `estimador` con una submuestra estratificada de a lo sumo `n_max` filas.
 
-    TabPFN (2.2.1) recibe el entrenamiento como contexto y está preentrenado para a lo sumo
-    10.000 filas y 500 features, con cualquier hardware: es una limitación del modelo, no del
-    cómputo, y se documenta como tal. Hasta la mitad de la submuestra son positivos.
+    TabPFN recibe el entrenamiento como contexto (no se entrena). TabPFN-3.5 admite hasta 1M de
+    filas, pero el costo de predecir crece con el contexto y en la medición (scripts/medir_tabpfn.py)
+    100.000 filas no mejoraron a 20.000: se usan 20.000. Hasta la mitad son positivos.
     """
 
-    def __init__(self, estimador=None, n_max: int = 10_000, random_state: int = SEMILLA):
+    def __init__(self, estimador=None, n_max: int = 20_000, random_state: int = SEMILLA):
         self.estimador = estimador
         self.n_max = n_max
         self.random_state = random_state
@@ -294,8 +296,12 @@ def construir_estimador(familia: str, params: dict | None = None, seed: int = SE
         return _mlp_skorch(params, seed)
     if familia == "tabpfn":
         from tabpfn import TabPFNClassifier  # noqa: PLC0415
-        n_max = params.pop("n_max", 10_000)  # límite de preentrenamiento de TabPFN 2.2.1
-        return ConSubmuestra(TabPFNClassifier(**({"device": "cuda", "random_state": seed} | params)),
+        n_max = params.pop("n_max", 20_000)  # contexto medido: más filas no mejoraron
+        # Pesos de TabPFN-3.5-Fast fijados por ruta (TABPFN_MODEL_PATH, junto a los datos;
+        # SHA-256 en el README). Con "auto" se descargarían en la primera ejecución con token.
+        ruta = os.getenv("TABPFN_MODEL_PATH", "auto")
+        return ConSubmuestra(TabPFNClassifier(**({"device": "cuda", "random_state": seed,
+                                                  "model_path": ruta} | params)),
                              n_max=n_max, random_state=seed)
     raise ValueError(f"Familia desconocida: {familia}")
 
@@ -660,7 +666,7 @@ def evaluar_cv(familia_o_modelo, df: pd.DataFrame, columnas: list[str],
         st = _score(modelo, X_de(pos_m))
         tr.append(curva_evento(dt["SSD_KEY"], dt["OBSERVATION_DATE"], dt["DAYS_TO_FAILURE"], st).pr_auc)
 
-        oofs.append(pd.DataFrame({"SSD_KEY": dv["SSD_KEY"].to_numpy(),
+        oofs.append(pd.DataFrame({"SSD_KEY": dv["SSD_KEY"].values,  # categórica si viene de la caché
                                   "OBSERVATION_DATE": dv["OBSERVATION_DATE"].to_numpy(),
                                   "DAYS_TO_FAILURE": dv["DAYS_TO_FAILURE"].to_numpy(),
                                   "TARGET_30D": y[iva], "score": sv, "pliegue": i}))

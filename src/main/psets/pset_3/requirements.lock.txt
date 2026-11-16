@@ -152,6 +152,7 @@ jupyterlab_widgets @ file:///home/conda/feedstock_root/build_artifacts/jupyterla
 kiwisolver @ file:///home/conda/feedstock_root/build_artifacts/kiwisolver_1736908181161/work
 lazy_loader @ file:///home/conda/feedstock_root/build_artifacts/lazy-loader_1733636780672/work
 libmambapy @ file:///home/conda/feedstock_root/build_artifacts/mamba-split_1749108038998/work/libmambapy
+lightgbm==4.7.0
 linkify-it-py @ file:///home/conda/feedstock_root/build_artifacts/linkify-it-py_1733781180837/work
 llvmlite==0.44.0
 locket @ file:///home/conda/feedstock_root/build_artifacts/locket_1650660393415/work
@@ -242,6 +243,7 @@ pyct @ file:///home/conda/feedstock_root/build_artifacts/pyct_1734342495516/work
 pydantic==2.14.3
 pydantic-settings==2.16.3
 pydantic_core==2.50.4
+pydot==4.0.1
 Pygments @ file:///home/conda/feedstock_root/build_artifacts/pygments_1736243443484/work
 PyJWT==2.15.1
 pylibcudf @ file:///tmp/conda-bld-output/bld/rattler-build_pylibcudf/work/python/pylibcudf
@@ -281,6 +283,7 @@ rpds-py @ file:///home/conda/feedstock_root/build_artifacts/bld/rattler-build_rp
 ruamel.yaml @ file:///home/conda/feedstock_root/build_artifacts/ruamel.yaml_1748629976895/work
 ruamel.yaml.clib @ file:///home/conda/feedstock_root/build_artifacts/ruamel.yaml.clib_1728724466132/work
 s3transfer==0.19.3
+safetensors==0.8.0
 scikit-image @ file:///home/conda/feedstock_root/build_artifacts/scikit-image_1729813832871/work/dist/scikit_image-0.24.0-cp312-cp312-linux_x86_64.whl#sha256=c02226adc1bbc3cff0787d5d2c2ef3ff92d050487b0086107059af19dc29b97d
 scikit-learn==1.6.1
 scipy @ file:///home/conda/feedstock_root/build_artifacts/scipy-split_1739790643552/work/dist/scipy-1.15.2-cp312-cp312-linux_x86_64.whl#sha256=9c4c390e67a1320f6f3b418568855f0a6759c34ce8e5b9eb6cc90d02fd7ba711
@@ -292,6 +295,7 @@ shapely @ file:///home/conda/feedstock_root/build_artifacts/shapely_174766430216
 simpervisor @ file:///home/conda/feedstock_root/build_artifacts/simpervisor_1734339819296/work
 six @ file:///home/conda/feedstock_root/build_artifacts/six_1733380938961/work
 skorch==1.4.0
+skrub==0.10.1
 slicer==0.0.8
 smmap==5.0.3
 sniffio @ file:///home/conda/feedstock_root/build_artifacts/sniffio_1733244044561/work
@@ -306,7 +310,7 @@ starlette==1.10.0
 statsmodels @ file:///home/conda/feedstock_root/build_artifacts/statsmodels_1727986688191/work
 streamz @ file:///home/conda/feedstock_root/build_artifacts/streamz_1734714199010/work
 sympy==1.14.0
-tabpfn==2.2.1
+tabpfn==10.0.0
 tabpfn-common-utils==0.2.23
 tabulate==0.10.0
 tblib @ file:///home/conda/feedstock_root/build_artifacts/tblib_1743515515538/work

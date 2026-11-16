@@ -43,6 +43,7 @@ en las imágenes. Lo que se fija es cada versión:
 | Paquetes de pip | `requirements.txt` + `constraints.txt` | `pip install -r requirements.txt -c constraints.txt`: versión exacta de todo lo que instala pip, incluidas las dependencias transitivas |
 | Paquetes del conda de RAPIDS | Vienen en la imagen base | El digest los fija |
 | Registro completo | `requirements.lock.txt` | `pip freeze` del contenedor que corrió los notebooks |
+| Pesos de TabPFN | `$DATOS_DIR_HOST/modelos/tabpfn/tabpfn-v3.5-fast-20260909.safetensors` (`TABPFN_MODEL_PATH`) | Paquete `tabpfn==10.0.0`, pesos **TabPFN-3.5-Fast**, SHA-256 `14e0b81285bca7a6d1ef121169f27f651f76dff49cad6c0b8779d5c836018550`. Licencia no comercial de Prior Labs: para descargarlos una vez hace falta una cuenta en ux.priorlabs.ai que acepte la licencia y su token en `TABPFN_TOKEN`; después corren sin token |
 
 Si se cambia `requirements.txt`: reconstruir, volver a congelar y regenerar las restricciones:
 
