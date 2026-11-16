@@ -181,11 +181,12 @@ class ReglaUmbralSMART(BaseEstimator, ClassifierMixin):
 class ConSubmuestra(BaseEstimator, ClassifierMixin):
     """Entrena `estimador` con una submuestra estratificada de a lo sumo `n_max` filas.
 
-    TabPFN recibe el entrenamiento como contexto y no admite más de ~50k filas con cualquier
-    hardware: es una limitación del modelo, no del cómputo, y se documenta como tal.
+    TabPFN (2.2.1) recibe el entrenamiento como contexto y está preentrenado para a lo sumo
+    10.000 filas y 500 features, con cualquier hardware: es una limitación del modelo, no del
+    cómputo, y se documenta como tal. Hasta la mitad de la submuestra son positivos.
     """
 
-    def __init__(self, estimador=None, n_max: int = 50_000, random_state: int = SEMILLA):
+    def __init__(self, estimador=None, n_max: int = 10_000, random_state: int = SEMILLA):
         self.estimador = estimador
         self.n_max = n_max
         self.random_state = random_state
@@ -293,7 +294,7 @@ def construir_estimador(familia: str, params: dict | None = None, seed: int = SE
         return _mlp_skorch(params, seed)
     if familia == "tabpfn":
         from tabpfn import TabPFNClassifier  # noqa: PLC0415
-        n_max = params.pop("n_max", 50_000)
+        n_max = params.pop("n_max", 10_000)  # límite de preentrenamiento de TabPFN 2.2.1
         return ConSubmuestra(TabPFNClassifier(**({"device": "cuda", "random_state": seed} | params)),
                              n_max=n_max, random_state=seed)
     raise ValueError(f"Familia desconocida: {familia}")
