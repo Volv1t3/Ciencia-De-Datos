@@ -744,8 +744,18 @@ class ResultadoCV:
         }
 
 
-def _score(modelo, X) -> np.ndarray:
-    return np.asarray(modelo.predict_proba(X))[:, 1]
+def _score(modelo, X, lote: int = 2_000_000) -> np.ndarray:
+    """Probabilidad de la clase positiva, por bloques.
+
+    Predecir ~10M de filas de una vez sube ~17 GB a la GPU; en un servidor compartido (otros
+    procesos pueden ocupar casi toda la memoria de la GPU) eso agota la memoria. Por bloques, el
+    pico es de ~3 GB y el resultado es idéntico.
+    """
+    if len(X) <= lote:
+        return np.asarray(modelo.predict_proba(X))[:, 1]
+    partes = [np.asarray(modelo.predict_proba(X.iloc[i:i + lote] if hasattr(X, "iloc") else X[i:i + lote]))[:, 1]
+              for i in range(0, len(X), lote)]
+    return np.concatenate(partes)
 
 
 def evaluar_cv(familia_o_modelo, df: pd.DataFrame, columnas: list[str],

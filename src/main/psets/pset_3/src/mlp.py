@@ -50,24 +50,40 @@ class MLPBinaria(BaseEstimator, ClassifierMixin):
     def _dispositivo(self):
         return torch.device(self.device or ("cuda" if torch.cuda.is_available() else "cpu"))
 
+    def _donde_datos(self, dev, n_bytes: int):
+        """GPU si los datos caben holgados en su memoria LIBRE; si no, RAM (y se sube cada lote).
+
+        En un servidor compartido otros procesos pueden ocupar casi toda la GPU: con los datos en
+        RAM el entrenamiento es más lento, pero no falla por memoria.
+        """
+        if dev.type != "cuda":
+            return dev
+        libre, _ = torch.cuda.mem_get_info(dev)
+        return dev if n_bytes * 1.5 + 2 * 2**30 < libre else torch.device("cpu")
+
     def fit(self, X, y):
         dev = self._dispositivo()
         torch.manual_seed(self.random_state)
-        Xt = torch.as_tensor(np.ascontiguousarray(X, dtype=np.float32), device=dev)
-        yt = torch.as_tensor(np.asarray(y, dtype=np.float32), device=dev)
+        A = np.ascontiguousarray(X, dtype=np.float32)
+        dev_datos = self._donde_datos(dev, A.nbytes)
+        self.datos_en_gpu_ = dev_datos.type == "cuda"
+        Xt = torch.as_tensor(A, device=dev_datos)
+        yt = torch.as_tensor(np.asarray(y, dtype=np.float32), device=dev_datos)
         red = RedMLP(Xt.shape[1], tuple(self.ocultas), self.dropout).to(dev)
         opt = torch.optim.AdamW(red.parameters(), lr=self.lr, weight_decay=self.weight_decay)
         perdida = torch.nn.BCEWithLogitsLoss(pos_weight=torch.tensor(float(self.pos_weight), device=dev))
-        gen = torch.Generator(device=dev).manual_seed(self.random_state)
+        # La permutación se genera siempre en CPU: el orden de los lotes depende solo de la semilla,
+        # no de si los datos quedaron en la GPU o en RAM.
+        gen = torch.Generator().manual_seed(self.random_state)
         red.train()
         self.perdida_por_epoca_ = []
         for _ in range(self.max_epochs):
-            orden = torch.randperm(len(Xt), device=dev, generator=gen)
+            orden = torch.randperm(len(Xt), generator=gen).to(dev_datos)
             total = 0.0
             for i in range(0, len(Xt), self.batch_size):
                 idx = orden[i:i + self.batch_size]
                 opt.zero_grad(set_to_none=True)
-                loss = perdida(red(Xt[idx]), yt[idx])
+                loss = perdida(red(Xt[idx].to(dev, non_blocking=True)), yt[idx].to(dev, non_blocking=True))
                 loss.backward()
                 opt.step()
                 total += loss.item() * len(idx)
