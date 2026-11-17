@@ -103,6 +103,7 @@ Ejecutar en Jupyter (contenedor `jupyter-gpu`) con **Restart & Run All**; la sal
 | 3 | `notebooks/03_baseline_candidatos.ipynb` | 3 baselines + 5 familias + LLM (`fase=baseline`/`candidato`) |
 | 4 | `notebooks/04_tuning.ipynb` | Optuna, 30 trials × 3 modelos como corridas anidadas (`fase=tuning`) |
 | 5 | `notebooks/05_seleccion.ipynb` | Prueba única, costo de negocio, registry `champion`/`challenger`, `docs/corridas.csv` |
+| 6 | `notebooks/06_reproducir_champion.ipynb` | Notebook limpio: carga `models:/ssd-failure-modelo@champion` y reproduce la métrica de prueba registrada |
 
 La lógica vive en `src/` y los notebooks la importan:
 
@@ -120,7 +121,7 @@ python -m pytest -q tests   # métricas por evento contra la definición literal
 ```
 pset_3/
 ├── docker-compose.yml   docker/        .env.example   requirements.txt   README.md
-├── notebooks/           01_eda … 05_seleccion
+├── notebooks/           01_eda … 05_seleccion, 06_reproducir_champion
 ├── src/                 datos.py  pipeline.py
 ├── tests/               test_pipeline.py
 └── docs/                corridas.csv   figuras/   PSet3_memo_Arellano_Guaman_Perla_Teran.pdf
