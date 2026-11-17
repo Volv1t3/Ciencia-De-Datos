@@ -1,13 +1,13 @@
 {
   "modelo": "ssd-failure-modelo",
   "champion": {
-    "run_id": "74b6bda293ea4c7c82c9e7d221db0762",
-    "version": "1",
+    "run_id": "5578b7863c0e49cabc664af36dbf4741",
+    "version": "3",
     "test_pr_auc_evento": 0.007539956157613595
   },
   "challenger": {
-    "run_id": "61127764edb8485d99445488f0a2cf2a",
-    "version": "2",
+    "run_id": "8b38126a0faf43a6a05f92cae860fbd8",
+    "version": "4",
     "test_pr_auc_evento": 0.010159443145869697
   },
   "dataset_sha256": "c0b1ea5c055579e01023c006e04a040686c8a32a4f8512ceddb7070b0f2a111c"
