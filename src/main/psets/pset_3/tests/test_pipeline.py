@@ -358,6 +358,34 @@ def test_commit_git_ignora_salidas_de_notebooks_y_docs(tmp_path, monkeypatch):
     assert pl.commit_git().endswith("-dirty")
 
 
+def test_umbral_por_presupuesto_no_usa_etiquetas_ni_escala(df):
+    s = df["R_5"].to_numpy() + np.random.default_rng(0).random(len(df)) * 1e-3
+    exp = pl.ssd_meses(df["SSD_KEY"], df["OBSERVATION_DATE"])
+    curva = pl.curva_evento(df["SSD_KEY"], df["OBSERVATION_DATE"], df["DAYS_TO_FAILURE"], s)
+    objetivo = float(pl.presupuesto(curva.alertas[len(curva.alertas) // 3], exp))
+    tau = pl.umbral_para_presupuesto(df["SSD_KEY"], df["OBSERVATION_DATE"], s, objetivo, exp)
+    m = pl.metricas_evento(df["SSD_KEY"], df["OBSERVATION_DATE"], df["DAYS_TO_FAILURE"], s, tau)
+    assert pl.presupuesto(m["alertas"], exp) <= objetivo + 1e-9
+    assert pl.presupuesto(m["alertas"], exp) >= 0.8 * objetivo        # cerca del presupuesto
+    # Una transformación monótona del score (otra escala) da exactamente las mismas alertas
+    s2 = np.log1p(s) * 7 + 3
+    tau2 = pl.umbral_para_presupuesto(df["SSD_KEY"], df["OBSERVATION_DATE"], s2, objetivo, exp)
+    m2 = pl.metricas_evento(df["SSD_KEY"], df["OBSERVATION_DATE"], df["DAYS_TO_FAILURE"], s2, tau2)
+    assert m2["alertas"] == m["alertas"] and m2["aciertos"] == m["aciertos"]
+    # Sin presupuesto no se alerta
+    assert pl.umbral_para_presupuesto(df["SSD_KEY"], df["OBSERVATION_DATE"], s, 0.0, exp) == np.inf
+
+
+def test_costo_con_presupuesto(df):
+    s = df["R_5"].to_numpy()
+    exp = pl.ssd_meses(df["SSD_KEY"], df["OBSERVATION_DATE"])
+    curva = pl.curva_evento(df["SSD_KEY"], df["OBSERVATION_DATE"], df["DAYS_TO_FAILURE"], s)
+    p = pl.presupuestos_por_k(curva, exp, ks=[1, 10, 50])
+    c = pl.costo_con_presupuesto(df["SSD_KEY"], df["OBSERVATION_DATE"], df["DAYS_TO_FAILURE"], s * 100, p)
+    assert (c["alertas_por_1000"] <= c["alertas_por_1000_cv"] + 1e-9).all()
+    assert c["alertas"].is_monotonic_increasing          # fallas más caras -> se alerta más
+
+
 def test_prep_reutilizable_y_orden_de_filas_irrelevante(df):
     s = df["R_5"].to_numpy()
     prep = pl.preparar_eventos(df["SSD_KEY"], df["OBSERVATION_DATE"], df["DAYS_TO_FAILURE"])

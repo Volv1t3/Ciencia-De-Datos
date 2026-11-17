@@ -57,6 +57,18 @@ notebook() {  # notebook <archivo.ipynb> <log> [variables de entorno...]
 }
 
 log "iniciada (GPUs propias $GPUS_PROPIAS, mínimo ${MIN_LIBRE_MB} MiB libres)"
+
+# SOLO_FINALES=1: re-ejecuta solo 03 → 05 → 06 (tuning y TabPFN ya terminados y registrados)
+if [[ "${SOLO_FINALES:-}" == 1 ]]; then
+  OMITIR=""
+  [[ $(ls "$DATOS/llm_cache/gemini-3.8-flash" 2>/dev/null | wc -l) -lt 25 ]] && OMITIR="llm"
+  notebook 03_baseline_candidatos.ipynb nb03_final.log "PSET3_OMITIR=$OMITIR"
+  notebook 05_seleccion.ipynb nb05.log
+  notebook 06_reproducir_champion.ipynb nb06.log
+  log "terminada (solo finales): notebooks 03, 05 y 06 ejecutados"
+  exit 0
+fi
+
 notebook 04_tuning.ipynb nb04.log
 
 esperar familia_tabpfn.log

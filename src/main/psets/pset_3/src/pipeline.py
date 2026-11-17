@@ -721,6 +721,60 @@ def k_equilibrio(costos_modelo: pd.DataFrame, costos_baseline: pd.DataFrame) -> 
 
 
 # --------------------------------------------------------------------------------------------
+# Presupuesto de alertas (PSet #1: comparar "al mismo presupuesto de alertas")
+# --------------------------------------------------------------------------------------------
+def presupuesto(alertas, exposicion_ssd_mes: float):
+    """Alertas (episodios) por 1.000 SSD-mes."""
+    return 1000.0 * np.asarray(alertas, dtype=float) / exposicion_ssd_mes
+
+
+def umbral_para_presupuesto(ssd, fecha, score, alertas_por_1000: float, exposicion_ssd_mes: float | None = None,
+                            n_umbrales: int = 2 * N_UMBRALES, prep: EventosPreparados | None = None) -> float:
+    """Umbral con el que `score` emite a lo sumo `alertas_por_1000` episodios por 1.000 SSD-mes.
+
+    NO usa etiquetas: contar episodios solo necesita disco, fecha y score. Por eso se puede aplicar
+    a la prueba sin fuga, y el resultado no depende de la escala del score (solo de su orden): un
+    τ elegido en la CV se lleva al modelo final como presupuesto, no como valor de score.
+    """
+    if not np.isfinite(alertas_por_1000) or alertas_por_1000 <= 0:
+        return np.inf
+    exposicion = exposicion_ssd_mes if exposicion_ssd_mes is not None else ssd_meses(ssd, fecha)
+    if prep is None:
+        prep = preparar_eventos(ssd, fecha, np.full(len(np.asarray(score)), np.nan))  # sin etiquetas
+    umbrales = _umbrales(score, n_umbrales)            # descendentes
+    alertas, _, _ = _contar(prep, score, umbrales, EPISODIO_DIAS)
+    tasa = presupuesto(alertas, exposicion)
+    dentro = np.flatnonzero(tasa <= alertas_por_1000 + 1e-9)
+    if len(dentro) == 0:
+        return np.inf
+    return float(umbrales[dentro[np.argmax(tasa[dentro])]])
+
+
+def presupuestos_por_k(curva: CurvaEvento, exposicion_ssd_mes: float, ks=range(1, 51)) -> pd.DataFrame:
+    """Para cada k, el presupuesto de alertas que minimiza el costo en `curva` (predicciones OOF de la CV)."""
+    t = barrer_k(curva, exposicion_ssd_mes, ks)
+    t["alertas_por_1000"] = presupuesto(t["alertas"], exposicion_ssd_mes)
+    return t[["k", "alertas_por_1000", "tau", "costo"]].rename(columns={"tau": "tau_cv", "costo": "costo_cv"})
+
+
+def costo_con_presupuesto(ssd, fecha, dias, score, presupuestos: pd.DataFrame) -> pd.DataFrame:
+    """Aplica en otro conjunto (prueba) los presupuestos elegidos en la CV; el umbral de cada k se
+    busca sin etiquetas y luego se mide el costo con las etiquetas."""
+    exp = ssd_meses(ssd, fecha)
+    prep_sin = preparar_eventos(ssd, fecha, np.full(len(np.asarray(score)), np.nan))
+    prep = preparar_eventos(ssd, fecha, dias)
+    filas = []
+    for _, f in presupuestos.iterrows():
+        tau = umbral_para_presupuesto(None, None, score, f["alertas_por_1000"], exp, prep=prep_sin)
+        m = metricas_evento(None, None, None, score, tau, prep=prep)
+        filas.append({"k": f["k"], "alertas_por_1000_cv": f["alertas_por_1000"], "tau": tau, **m,
+                      "alertas_por_1000": float(presupuesto(m["alertas"], exp)),
+                      "costo": float(costo_por_1000(m["alertas"], m["aciertos"], m["eventos"], exp, f["k"])),
+                      "costo_sin_modelo": 1000.0 * f["k"] * m["eventos"] / exp})
+    return pd.DataFrame(filas)
+
+
+# --------------------------------------------------------------------------------------------
 # Evaluación con CV
 # --------------------------------------------------------------------------------------------
 @dataclass
