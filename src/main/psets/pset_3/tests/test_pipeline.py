@@ -333,6 +333,31 @@ def test_cache_de_preprocesamiento_da_el_mismo_resultado(df):
     assert modelo.predict_proba(df[cols]).shape == (len(df), 2)   # el Pipeline devuelto es completo
 
 
+def test_commit_git_ignora_salidas_de_notebooks_y_docs(tmp_path, monkeypatch):
+    import shutil
+    import subprocess
+    if shutil.which("git") is None:
+        pytest.skip("sin git")
+    repo = tmp_path / "repo"
+    (repo / "src").mkdir(parents=True)
+    (repo / "docs").mkdir()
+    (repo / "notebooks").mkdir()
+    (repo / "src" / "a.py").write_text("x = 1\n")
+    (repo / "docs" / "r.json").write_text("{}")
+    (repo / "notebooks" / "n.ipynb").write_text("{}")
+    git = ["git", "-c", "user.email=t@t", "-c", "user.name=t"]
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(git + ["-C", str(repo), "add", "."], check=True)
+    subprocess.run(git + ["-C", str(repo), "commit", "-qm", "c"], check=True)
+    monkeypatch.chdir(repo / "notebooks")
+    assert not pl.commit_git().endswith("-dirty")
+    (repo / "docs" / "r.json").write_text('{"x": 1}')            # salida regenerada
+    (repo / "notebooks" / "n.ipynb").write_text('{"celdas": 1}')  # notebook ejecutado
+    assert not pl.commit_git().endswith("-dirty")
+    (repo / "src" / "a.py").write_text("x = 2\n")                # cambio de código
+    assert pl.commit_git().endswith("-dirty")
+
+
 def test_prep_reutilizable_y_orden_de_filas_irrelevante(df):
     s = df["R_5"].to_numpy()
     prep = pl.preparar_eventos(df["SSD_KEY"], df["OBSERVATION_DATE"], df["DAYS_TO_FAILURE"])

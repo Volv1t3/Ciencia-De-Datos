@@ -889,9 +889,15 @@ NOMBRE_MODELO_REGISTRO = "ssd-failure-modelo"
 
 
 def commit_git() -> str:
+    """SHA de HEAD; "-dirty" si hay cambios de CÓDIGO sin commit.
+
+    Las salidas de los notebooks (.ipynb ejecutados) y lo que generan en docs/ no cuentan: cada
+    notebook los reescribe al correr, y marcarían como "dirty" corridas con el código idéntico.
+    """
     try:
         sha = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
-        sucio = subprocess.run(["git", "diff", "--quiet", "HEAD"]).returncode != 0
+        sucio = subprocess.run(["git", "diff", "--quiet", "HEAD", "--", ":/", ":(top,exclude,glob)**/*.ipynb",
+                                ":(top,exclude,glob)**/docs/**"]).returncode != 0
         return sha + ("-dirty" if sucio else "")
     except (OSError, subprocess.CalledProcessError):
         return "desconocido"
