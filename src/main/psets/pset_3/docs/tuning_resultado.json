@@ -1,0 +1,69 @@
+{
+  "bosque": {
+    "mejores_hiperparametros": {
+      "n_estimators": 326,
+      "max_depth": 6,
+      "subsample": 0.7790309351092926,
+      "colsample_bynode": 0.4773809587790903,
+      "min_child_weight": 11.47834513890925,
+      "reg_lambda": 33.33770472244868
+    },
+    "trial": 25,
+    "run_id_optimizado": "a5a930642e884ef7b25ce6b575ffb1c1",
+    "cv_por_defecto": 0.01203977562618347,
+    "std_por_defecto": 0.009692427592138599,
+    "cv_optimizado": 0.019219236101240097,
+    "std_optimizado": 0.01836090565628208,
+    "mejora": 0.007179460475056626,
+    "mejora_relativa": 0.5963118165959101,
+    "mejora_supera_std": false,
+    "train_optimizado": 0.09611614298913694,
+    "brecha_optimizado": 0.07689690688789684
+  },
+  "mlp": {
+    "mejores_hiperparametros": {
+      "arquitectura": "512-256-128",
+      "dropout": 0.32118194379953446,
+      "lr": 0.005070854621834277,
+      "weight_decay": 0.0008558364518486091,
+      "max_epochs": 6,
+      "batch_size": 65536,
+      "pos_weight": 8.466746460732747
+    },
+    "trial": 18,
+    "run_id_optimizado": "95654c5c74c6409db6106dd76ddfb871",
+    "cv_por_defecto": 0.010929809840163758,
+    "std_por_defecto": 0.006187683897573494,
+    "cv_optimizado": 0.014307702314930247,
+    "std_optimizado": 0.009698852347585123,
+    "mejora": 0.0033778924747664887,
+    "mejora_relativa": 0.309053178798569,
+    "mejora_supera_std": false,
+    "train_optimizado": 0.15222968903280878,
+    "brecha_optimizado": 0.13792198671787853
+  },
+  "xgboost": {
+    "mejores_hiperparametros": {
+      "n_estimators": 506,
+      "learning_rate": 0.010425814378866773,
+      "max_depth": 4,
+      "min_child_weight": 30.680151909791206,
+      "subsample": 0.671453098420975,
+      "colsample_bytree": 0.6985444606331175,
+      "reg_lambda": 0.0038416705159479716,
+      "reg_alpha": 0.3297323179064715,
+      "gamma": 0.7655305854361742
+    },
+    "trial": 25,
+    "run_id_optimizado": "117dffec89614594b0b6e3ec87140ca7",
+    "cv_por_defecto": 0.009861373416357603,
+    "std_por_defecto": 0.004527462978060426,
+    "cv_optimizado": 0.019246432022995495,
+    "std_optimizado": 0.018640852584475093,
+    "mejora": 0.009385058606637893,
+    "mejora_relativa": 0.9516989379055842,
+    "mejora_supera_std": true,
+    "train_optimizado": 0.100575966656123,
+    "brecha_optimizado": 0.0813295346331275
+  }
+}
