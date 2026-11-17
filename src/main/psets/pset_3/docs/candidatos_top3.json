@@ -1,0 +1,19 @@
+{
+  "familias": [
+    "bosque",
+    "mlp",
+    "xgboost"
+  ],
+  "cv_pr_auc_evento_media": [
+    0.01204,
+    0.01093,
+    0.00986
+  ],
+  "cv_pr_auc_evento_std": [
+    0.00969,
+    0.00619,
+    0.00453
+  ],
+  "frac_sanos_train": 0.15,
+  "dataset_sha256": "c0b1ea5c055579e01023c006e04a040686c8a32a4f8512ceddb7070b0f2a111c"
+}
