@@ -1,0 +1,23 @@
+# Paquetes que se instalan SOBRE la imagen de RAPIDS (docker/Dockerfile.gpu).
+# cuDF, cuML, XGBoost (CUDA), scikit-learn, pandas, numpy, pyarrow y JupyterLab vienen en la imagen.
+#
+# Reproducibilidad: después del primer build en el H200 se congela el entorno exacto con
+#   docker compose exec jupyter-gpu pip freeze > requirements.lock.txt
+# y ese archivo se versiona. Los notebooks registran además las versiones en cada corrida.
+
+mlflow==3.1.1               # cliente; igual a la versión del servidor (docker/Dockerfile.mlflow)
+sqlalchemy==2.0.41          # 2.1 rompe MLflow 3.1.x (mismo pin que el servidor)
+alembic==1.16.2
+optuna>=4.3,<5
+torch==2.15.0               # MLP; probado con CUDA 13.2 + NCCL 2.30 en el H200 (ver LD_PRELOAD en docker-compose)
+skorch>=1.1,<2              # envoltorio sklearn para la MLP de PyTorch
+tabpfn==10.0.0              # modelo fundacional tabular (familia "state of the art"); pesos TabPFN-3.5-Fast
+google-genai==3.3.0         # LLM por prompting (API de Gemini, nivel gratuito; notebook 03)
+snowflake-connector-python[pandas]>=3.12,<4
+shap>=0.46,<1
+python-dotenv>=1.0,<2
+matplotlib>=3.9,<4
+seaborn>=0.13,<1
+scipy>=1.13,<2
+pytest>=8,<9
+numba>=0.60                 # conteo de episodios por evento (ya viene en RAPIDS; se declara para usos fuera de la imagen)

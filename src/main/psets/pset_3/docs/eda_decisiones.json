@@ -1,0 +1,11 @@
+{
+  "variante": "R",
+  "atributo_regla": "R_198",
+  "sentido_regla": "alto = riesgo",
+  "pr_auc_evento_regla_univariada": 0.0068,
+  "pr_auc_evento_azar": 0.0016,
+  "episodio_dias": 30,
+  "eventos_anticipables_train": 9070,
+  "prevalencia_fila_train": 0.002454,
+  "dataset_sha256": "c0b1ea5c055579e01023c006e04a040686c8a32a4f8512ceddb7070b0f2a111c"
+}

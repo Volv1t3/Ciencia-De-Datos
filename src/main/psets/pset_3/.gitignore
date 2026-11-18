@@ -1,0 +1,16 @@
+# Credenciales locales: nunca versionar
+.env
+
+# Snapshot de datos (cientos de GB; se reconstruye con src/datos.py y se verifica por hash)
+datos/
+*.parquet
+
+# MLflow local y artefactos temporales
+mlruns/
+mlartifacts/
+
+# Python / Jupyter
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+.pytest_cache/

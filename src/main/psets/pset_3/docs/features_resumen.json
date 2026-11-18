@@ -1,0 +1,16 @@
+[
+  {
+    "feature":"DAYS_SINCE_FIRST_SEEN",
+    "dónde":"SQL de extracción",
+    "PR-AUC por evento":0.0042668546,
+    "× azar":2.6667840948,
+    "no-fuga":"fecha − edad constante por disco y ≤ primera fila"
+  },
+  {
+    "feature":"N_CRITICAL_DEGRADING_30D",
+    "dónde":"FeaturesDerivadas (Pipeline)",
+    "PR-AUC por evento":0.0032438492,
+    "× azar":2.0274057545,
+    "no-fuga":"fila a fila + ventanas recalculadas con solo el pasado"
+  }
+]

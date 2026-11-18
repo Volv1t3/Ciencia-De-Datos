@@ -1,0 +1,1021 @@
+"""Preparación, modelos, validación temporal, métricas por evento y registro en MLflow.
+
+Los notebooks importan este módulo; no copian su lógica.
+
+Definiciones comprometidas en el PSet #1 (memo Perla_Guaman_Teran_Arellano, sección 3.1):
+- *Episodio de alerta*: empieza el primer día con score >= tau y dura EPISODIO_DIAS (30) días,
+  durante los cuales el disco no vuelve a alertar. Al terminar, el disco puede abrir otro
+  episodio (en operación la alerta es un ticket: se revisa el disco y vuelve a servicio).
+  La lectura literal "una sola alerta por disco en todo el historial" (episodio_dias=None) se
+  reporta como sensibilidad: en la EDA (01) ~90 % de los discos bien detectados quedaban como
+  error porque su primera alerta llegaba meses antes de la falla.
+- Acierto: el disco falla entre 7 y 30 días después del inicio del episodio (DAYS_TO_FAILURE en [7, 30]).
+- Recall sobre eventos (discos que fallan), nunca sobre filas.
+- Selección por PR-AUC por evento; operación por F0,5 por evento.
+- Negocio: costo esperado por 1.000 SSD-mes, C_FP = 1 y C_FN = k, para k en [1, 50].
+"""
+
+from __future__ import annotations
+
+import os
+import re
+import subprocess
+import time
+from dataclasses import dataclass, field
+from typing import Callable, Iterator
+
+import numpy as np
+import pandas as pd
+from sklearn.base import BaseEstimator, ClassifierMixin, TransformerMixin, clone
+from sklearn.compose import ColumnTransformer, make_column_selector
+from sklearn.impute import SimpleImputer
+from sklearn.metrics import average_precision_score
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import FunctionTransformer, StandardScaler
+
+SEMILLA = 42
+
+# --------------------------------------------------------------------------------------------
+# Columnas
+# --------------------------------------------------------------------------------------------
+COLUMNAS_META = ("SSD_KEY", "OBSERVATION_DATE", "DAYS_TO_FAILURE", "TARGET_30D")
+# Fuga si entran como feature: describen el futuro del disco o son identificadores.
+COLUMNAS_PROHIBIDAS = frozenset({
+    "FIRST_FAILURE_DATE", "LAST_SEEN_DATE", "DAYS_TO_FAILURE", "LABEL_STATUS", "TARGET_30D",
+    "SMART_DAILY_KEY", "SSD_KEY", "DISK_ID", "MODEL_CODE", "OBSERVATION_DATE_KEY", "OBSERVATION_DATE",
+})
+
+PATRON_VALOR_DIA = r"^[RN]_\d+$"  # valor del día, sin ventanas: baseline "sin features temporales"
+# Atributos SMART de error/desgaste presentes en MC1. La EDA (01_eda) confirma cuáles separan.
+# Atributos de desgaste/errores. Sin 196 ni 170: en la EDA (01) son copias exactas de 5 (Spearman = 1)
+# y se contarían dos veces. 206 es copia de 171 y tampoco se incluye.
+ATRIBUTOS_CRITICOS_DEFECTO = (5, 171, 172, 183, 184, 187, 197, 198, 199)
+FEATURE_DEGRADACION = "N_CRITICAL_DEGRADING_30D"
+
+
+def columnas_modelo(df: pd.DataFrame, variante: str = "R") -> list[str]:
+    """Features que recibe el modelo: SMART de la variante (R, N o RN) + derivadas del SQL."""
+    if variante not in {"R", "N", "RN"}:
+        raise ValueError("variante debe ser R, N o RN")
+    prefijos = tuple(f"{v}_" for v in variante)  # "RN" -> ("R_", "N_")
+    cols = [c for c in df.columns
+            if c not in COLUMNAS_PROHIBIDAS and (c.startswith(prefijos) or c == "DAYS_SINCE_FIRST_SEEN")]
+    verificar_sin_fuga(cols)
+    return cols
+
+
+def verificar_sin_fuga(columnas) -> None:
+    fuga = COLUMNAS_PROHIBIDAS.intersection(columnas)
+    if fuga:
+        raise AssertionError(f"Columnas con fuga en X: {sorted(fuga)}")
+
+
+# --------------------------------------------------------------------------------------------
+# Features derivadas dentro del pipeline
+# --------------------------------------------------------------------------------------------
+class FeaturesDerivadas(BaseEstimator, TransformerMixin):
+    """Agrega N_CRITICAL_DEGRADING_30D: cuántos atributos críticos empeoran en 30 días.
+
+    Usa solo `{R|N}_{id}_MEAN_SHIFT_30D`, que compara la media de los últimos 30 días con la de
+    los 30 anteriores: es información disponible el día de la predicción. Sin estado aprendido.
+    """
+
+    def __init__(self, atributos=ATRIBUTOS_CRITICOS_DEFECTO, representacion: str = "R",
+                 salida: str = "pandas"):
+        self.atributos = atributos
+        self.representacion = representacion
+        self.salida = salida  # "numpy": matriz float32 lista para XGBoost/árboles (una sola copia)
+
+    def _columnas(self, X):
+        return [c for a in self.atributos
+                if (c := f"{self.representacion}_{a}_MEAN_SHIFT_30D") in X.columns]
+
+    def fit(self, X, y=None):
+        self.columnas_shift_ = self._columnas(X)
+        self.feature_names_in_ = np.asarray(X.columns, dtype=object)
+        return self
+
+    def transform(self, X):
+        shifts = X[self.columnas_shift_].to_numpy(dtype=np.float32, na_value=np.nan)
+        degradacion = np.sum(shifts > 0, axis=1).astype(np.float32)  # NaN > 0 es False
+        if self.salida == "numpy":
+            salida = np.empty((len(X), X.shape[1] + 1), dtype=np.float32)
+            salida[:, :-1] = X.to_numpy(dtype=np.float32, na_value=np.nan)
+            salida[:, -1] = degradacion
+            return salida
+        # pandas: sin X.copy() (con 100M filas duplicaría ~170 GB); concat no copia las columnas
+        sin_copia = {} if int(pd.__version__.split(".")[0]) >= 3 else {"copy": False}  # pandas 3: CoW
+        return pd.concat([X, pd.Series(degradacion, index=X.index, name=FEATURE_DEGRADACION)],
+                         axis=1, **sin_copia)
+
+    def get_feature_names_out(self, input_features=None):
+        return np.append(self.feature_names_in_, FEATURE_DEGRADACION)
+
+
+def _log1p_con_signo(x):
+    """log1p simétrico: comprime colas largas y respeta tendencias negativas (MEAN_SHIFT)."""
+    return np.sign(x) * np.log1p(np.abs(x))
+
+
+def _a_float32(a):
+    """torch y TabPFN esperan float32."""
+    return np.asarray(a, dtype=np.float32)
+
+
+# --------------------------------------------------------------------------------------------
+# Preprocesamiento numérico en paralelo (equivale a log1p con signo -> SimpleImputer(median,
+# add_indicator) -> StandardScaler de scikit-learn, que corren en un solo hilo)
+# --------------------------------------------------------------------------------------------
+import numba  # noqa: E402
+from numba import njit as _njit, prange as _prange  # noqa: E402
+
+numba.set_num_threads(min(int(os.getenv("PSET3_HILOS", "32")), numba.config.NUMBA_NUM_THREADS))
+
+
+@_njit(inline="always")
+def _log1p_signo_escalar(x):
+    if x > 0:
+        return np.log1p(x)
+    if x < 0:
+        return -np.log1p(-x)
+    return 0.0
+
+
+@_njit(parallel=True, cache=True)
+def _estadisticas_columnas(X):
+    """Por columna: mediana del valor transformado (sin NaN), media y varianza tras imputar,
+    y fracción de faltantes. Columnas sin ningún dato: mediana NaN."""
+    n, p = X.shape
+    med = np.full(p, np.nan)
+    media = np.zeros(p)
+    var = np.zeros(p)
+    frac_nan = np.zeros(p)
+    for j in _prange(p):
+        v = np.empty(n)
+        k = 0
+        for i in range(n):
+            x = X[i, j]
+            if not np.isnan(x):
+                v[k] = _log1p_signo_escalar(x)
+                k += 1
+        frac_nan[j] = (n - k) / n
+        if k == 0:
+            continue
+        m = np.median(v[:k])
+        med[j] = m
+        s = 0.0
+        for i in range(k):
+            s += v[i]
+        mu = (s + (n - k) * m) / n
+        ss = 0.0
+        for i in range(k):
+            d = v[i] - mu
+            ss += d * d
+        ss += (n - k) * (m - mu) * (m - mu)
+        media[j] = mu
+        var[j] = ss / n
+    return med, media, var, frac_nan
+
+
+@_njit(parallel=True, cache=True)
+def _transformar_columnas(X, cols, med, media, escala, cols_ind, media_ind, escala_ind):
+    n = X.shape[0]
+    k, m = len(cols), len(cols_ind)
+    out = np.empty((n, k + m), dtype=np.float32)
+    for jj in _prange(k + m):
+        if jj < k:
+            c = cols[jj]
+            for i in range(n):
+                x = X[i, c]
+                v = med[c] if np.isnan(x) else _log1p_signo_escalar(x)
+                out[i, jj] = (v - media[jj]) / escala[jj]
+        else:
+            c = cols_ind[jj - k]
+            for i in range(n):
+                v = 1.0 if np.isnan(X[i, c]) else 0.0
+                out[i, jj] = (v - media_ind[jj - k]) / escala_ind[jj - k]
+    return out
+
+
+class PreprocesadorNumerico(BaseEstimator, TransformerMixin):
+    """log1p con signo -> imputación por mediana (+ indicador de faltante) -> escalado estándar.
+
+    Mismo resultado que el Pipeline de scikit-learn equivalente (prueba en tests/), pero compilado
+    con numba y en paralelo por columnas (PSET3_HILOS hilos, 32 por defecto: servidor compartido).
+    Con 14M filas × 480 columnas, scikit-learn tardaba decenas de minutos por pliegue en un hilo.
+    Como SimpleImputer(keep_empty_features=False), descarta las columnas sin ningún dato; el
+    indicador se agrega para toda columna con faltantes en el ajuste, y también se escala.
+    """
+
+    def __init__(self, add_indicator: bool = True):
+        self.add_indicator = add_indicator
+
+    def fit(self, X, y=None):
+        nombres = np.asarray(getattr(X, "columns", [f"x{j}" for j in range(np.shape(X)[1])]), dtype=object)
+        A = np.asarray(X, dtype=np.float32)
+        med, media, var, frac_nan = _estadisticas_columnas(A)
+        self.cols_ = np.flatnonzero(~np.isnan(med)).astype(np.int64)
+        self.cols_ind_ = (np.flatnonzero(frac_nan > 0).astype(np.int64) if self.add_indicator
+                          else np.zeros(0, np.int64))
+        self.mediana_ = med
+        self.media_ = media[self.cols_]
+        self.escala_ = _escala_estandar(var[self.cols_])
+        f = frac_nan[self.cols_ind_]
+        self.media_ind_ = f
+        self.escala_ind_ = _escala_estandar(f * (1 - f))
+        self.feature_names_in_ = nombres
+        self.n_features_in_ = A.shape[1]
+        return self
+
+    def transform(self, X):
+        A = np.asarray(X, dtype=np.float32)
+        return _transformar_columnas(A, self.cols_, self.mediana_, self.media_, self.escala_,
+                                     self.cols_ind_, self.media_ind_, self.escala_ind_)
+
+    def get_feature_names_out(self, input_features=None):
+        n = self.feature_names_in_
+        return np.concatenate([n[self.cols_], np.array([f"missingindicator_{c}" for c in n[self.cols_ind_]],
+                                                       dtype=object)])
+
+
+def _escala_estandar(var):
+    """Como StandardScaler: desviación estándar, y 1 donde la varianza es ~0."""
+    s = np.sqrt(np.asarray(var, dtype=np.float64))
+    return np.where(s < 10 * np.finfo(np.float64).eps, 1.0, s)
+
+
+def construir_preprocesador(familia: str) -> Pipeline:
+    """Preprocesamiento por familia; se ajusta siempre solo con datos de entrenamiento.
+
+    - Árboles (bosque, xgboost, regla): reciben NaN de forma nativa; no se imputa ni escala.
+    - Lineales, MLP y TabPFN: log1p con signo -> mediana + indicador de faltante -> estándar.
+      La imputación vive aquí (no en Silver ni en la OBT) para ajustarse solo con train.
+    """
+    if familia in {"bosque", "xgboost"}:
+        # Árboles: matriz float32 directa (XGBoost la sube a la GPU sin pasar por pandas)
+        return Pipeline([("derivadas", FeaturesDerivadas(salida="numpy"))])
+    pasos = [("derivadas", FeaturesDerivadas())]
+    if familia in {"logistica", "sin_temporales", "mlp", "tabpfn"}:
+        # TabPFN: sin indicadores de faltante (413 features). Es la configuración medida en
+        # scripts/medir_tabpfn.py; los indicadores agregan ~100 columnas casi constantes y alargan
+        # la predicción, que es el cuello de botella de esta familia.
+        indicador = familia != "tabpfn"
+        # log1p con signo -> mediana (+ indicador) -> escala estándar, en paralelo (numba)
+        numericas = PreprocesadorNumerico(add_indicator=indicador)
+        selector = (make_column_selector(pattern=PATRON_VALOR_DIA)
+                    if familia == "sin_temporales" else make_column_selector(dtype_include=np.number))
+        pasos.append(("columnas", ColumnTransformer([("num", numericas, selector)],
+                                                   remainder="drop", verbose_feature_names_out=False)))
+        pasos.append(("float32", FunctionTransformer(_a_float32)))
+    return Pipeline(pasos)
+
+
+# --------------------------------------------------------------------------------------------
+# Estimadores propios
+# --------------------------------------------------------------------------------------------
+class ReglaUmbralSMART(BaseEstimator, ClassifierMixin):
+    """Baseline de negocio: regla de umbral sobre un solo atributo SMART (PSet #1).
+
+    El score es la función de distribución empírica del atributo en entrenamiento, así que es
+    monótono en el atributo y vive en [0, 1]: barrer tau equivale a barrer el umbral sobre el
+    atributo. Faltantes -> 0 (sin evidencia, no alerta).
+    """
+
+    def __init__(self, atributo: str = "R_5"):
+        self.atributo = atributo
+
+    def fit(self, X, y):
+        valores = pd.to_numeric(X[self.atributo], errors="coerce").to_numpy(dtype=np.float64)
+        self.referencia_ = np.sort(valores[~np.isnan(valores)])
+        self.classes_ = np.array([0, 1])
+        return self
+
+    def predict_proba(self, X):
+        v = pd.to_numeric(X[self.atributo], errors="coerce").to_numpy(dtype=np.float64)
+        p = np.searchsorted(self.referencia_, np.nan_to_num(v, nan=-np.inf), side="right")
+        p = p / max(len(self.referencia_), 1)
+        return np.column_stack([1 - p, p])
+
+    def predict(self, X):
+        return (self.predict_proba(X)[:, 1] >= 0.5).astype(int)
+
+
+class ConSubmuestra(BaseEstimator, ClassifierMixin):
+    """Entrena `estimador` con una submuestra estratificada de a lo sumo `n_max` filas.
+
+    TabPFN recibe el entrenamiento como contexto (no se entrena). TabPFN-3.5 admite hasta 1M de
+    filas, pero el costo de predecir crece con el contexto y en la medición (scripts/medir_tabpfn.py)
+    100.000 filas no mejoraron a 20.000: se usan 20.000. Hasta la mitad son positivos.
+    """
+
+    def __init__(self, estimador=None, n_max: int = 20_000, random_state: int = SEMILLA):
+        self.estimador = estimador
+        self.n_max = n_max
+        self.random_state = random_state
+
+    def fit(self, X, y):
+        y = np.asarray(y)
+        rng = np.random.default_rng(self.random_state)
+        if len(y) > self.n_max:
+            pos, neg = np.flatnonzero(y == 1), np.flatnonzero(y == 0)
+            n_pos = min(len(pos), self.n_max // 2)
+            idx = np.concatenate([rng.choice(pos, n_pos, replace=False),
+                                  rng.choice(neg, self.n_max - n_pos, replace=False)])
+            X, y = (X.iloc[idx] if hasattr(X, "iloc") else X[idx]), y[idx]
+        self.estimador_ = clone(self.estimador).fit(X, y)
+        self.classes_ = self.estimador_.classes_
+        return self
+
+    def predict_proba(self, X, lote: int = 200_000):
+        # Por bloques: predecir los ~10M de filas de un pliegue de una vez agotó la memoria de la GPU.
+        partes = [self.estimador_.predict_proba(X.iloc[i:i + lote] if hasattr(X, "iloc") else X[i:i + lote])
+                  for i in range(0, len(X), lote)]
+        return np.concatenate(partes) if partes else np.zeros((0, 2))
+
+    def predict(self, X):
+        return self.estimador_.predict(X)
+
+
+def _mlp_skorch(params: dict, seed: int):
+    from src.mlp import construir_mlp  # noqa: PLC0415 - importa torch solo para esta familia
+    return construir_mlp(params, seed)
+
+
+def _hay_cuml() -> bool:
+    import importlib.util  # noqa: PLC0415
+    return importlib.util.find_spec("cuml") is not None
+
+
+class _BalanceoAuto:
+    """Mixin para clasificadores XGBoost: acepta scale_pos_weight="balanced".
+
+    "balanced" = negativos/positivos del conjunto con que se entrena, calculado en cada fit:
+    con el submuestreo de discos sanos esa proporción cambia de un pliegue a otro.
+    """
+
+    def fit(self, X, y, **kw):
+        if isinstance(self.scale_pos_weight, str):
+            y_ = np.asarray(y)
+            pedido = self.scale_pos_weight
+            self.scale_pos_weight = float((y_ == 0).sum() / max((y_ == 1).sum(), 1))
+            try:
+                return super().fit(X, y, **kw)
+            finally:
+                self.scale_pos_weight = pedido
+        return super().fit(X, y, **kw)
+
+
+_CLASES_XGB: dict[str, type] = {}
+_NOMBRES_XGB = {"XGBClassifierBalanceado": "XGBClassifier", "XGBRFClassifierBalanceado": "XGBRFClassifier"}
+
+
+def _clase_xgb(nombre: str) -> type:
+    """Clase a nivel de módulo (pickle la encuentra por nombre), creada al primer uso."""
+    if nombre not in _CLASES_XGB:
+        import xgboost  # noqa: PLC0415
+        _CLASES_XGB[nombre] = type(nombre, (_BalanceoAuto, getattr(xgboost, _NOMBRES_XGB[nombre])),
+                                   {"__module__": __name__, "__qualname__": nombre})
+    return _CLASES_XGB[nombre]
+
+
+def __getattr__(nombre: str):  # PEP 562: permite que pickle/cloudpickle resuelvan las clases XGB
+    if nombre in _NOMBRES_XGB:
+        return _clase_xgb(nombre)
+    raise AttributeError(f"module {__name__!r} has no attribute {nombre!r}")
+
+
+def construir_estimador(familia: str, params: dict | None = None, seed: int = SEMILLA):
+    """Estimador sin preprocesamiento. Imports perezosos: cada familia trae su dependencia."""
+    params = dict(params or {})
+    if familia == "dummy":
+        from sklearn.dummy import DummyClassifier  # noqa: PLC0415
+        return DummyClassifier(strategy="prior", **params)
+    if familia == "regla":
+        return ReglaUmbralSMART(**params)
+    if familia in {"logistica", "sin_temporales"}:
+        # En GPU con cuML (mismo modelo: L2 + class_weight, solver quasi-Newton). Con 14M × 483,
+        # la de scikit-learn en CPU pasó 40 min sin converger en un pliegue. Sin cuML (pruebas
+        # locales) se usa scikit-learn; `motor` queda en los parámetros registrados.
+        motor = params.pop("motor", "cuml" if _hay_cuml() else "sklearn")
+        if motor == "cuml":
+            from cuml.linear_model import LogisticRegression as LogisticaGPU  # noqa: PLC0415
+            return LogisticaGPU(**({"max_iter": 1000, "class_weight": "balanced", "C": 1.0,
+                                    "output_type": "numpy"} | params))
+        from sklearn.linear_model import LogisticRegression  # noqa: PLC0415
+        return LogisticRegression(**({"max_iter": 1000, "class_weight": "balanced",
+                                      "random_state": seed} | params))
+    if familia == "bosque":
+        # Bagging: random forest de XGBoost en GPU (árboles completos sobre bootstrap de filas y un
+        # subconjunto aleatorio de columnas por nodo, promediados; sin boosting). Acepta NaN.
+        return _clase_xgb("XGBRFClassifierBalanceado")(**(
+            {"device": "cuda", "tree_method": "hist", "random_state": seed, "n_estimators": 300,
+             "max_depth": 12, "subsample": 0.632, "colsample_bynode": 0.1,
+             "scale_pos_weight": "balanced", "n_jobs": 16} | params))
+    if familia == "xgboost":
+        return _clase_xgb("XGBClassifierBalanceado")(**(
+            {"device": "cuda", "tree_method": "hist", "random_state": seed, "eval_metric": "aucpr",
+             "scale_pos_weight": "balanced", "n_jobs": 16} | params))
+    if familia == "mlp":
+        return _mlp_skorch(params, seed)
+    if familia == "tabpfn":
+        from tabpfn import TabPFNClassifier  # noqa: PLC0415
+        n_max = params.pop("n_max", 20_000)  # contexto medido: más filas no mejoraron
+        # Pesos de TabPFN-3.5-Fast fijados por ruta (TABPFN_MODEL_PATH, junto a los datos;
+        # SHA-256 en el README). Con "auto" se descargarían en la primera ejecución con token.
+        ruta = os.getenv("TABPFN_MODEL_PATH", "auto")
+        return ConSubmuestra(TabPFNClassifier(**({"device": "cuda", "random_state": seed,
+                                                  "model_path": ruta} | params)),
+                             n_max=n_max, random_state=seed)
+    raise ValueError(f"Familia desconocida: {familia}")
+
+
+def construir_modelo(familia: str, params: dict | None = None, seed: int = SEMILLA) -> Pipeline:
+    """Pipeline completo (preprocesamiento + modelo): es lo que se registra en MLflow."""
+    return Pipeline([("prep", construir_preprocesador(familia)),
+                     ("modelo", construir_estimador(familia, params, seed))])
+
+
+# --------------------------------------------------------------------------------------------
+# Validación cruzada temporal con embargo
+# --------------------------------------------------------------------------------------------
+class EmbargoTimeSeriesSplit:
+    """CV de ventana expansiva por FECHAS con embargo.
+
+    Los últimos `n_splits * meses_validacion` meses se dividen en bloques de validación
+    consecutivos; cada pliegue entrena con todo lo anterior a `inicio_validacion - embargo`.
+
+    `TimeSeriesSplit(gap=...)` cuenta filas, no días, y aquí las filas por día varían: por eso
+    el splitter propio. El embargo de 30 días evita que una fila de entrenamiento en t tenga una
+    etiqueta (que mira hasta t+30) solapada con el bloque de validación.
+    """
+
+    def __init__(self, n_splits: int = 4, meses_validacion: int = 2, embargo_dias: int = 30):
+        self.n_splits = n_splits
+        self.meses_validacion = meses_validacion
+        self.embargo_dias = embargo_dias
+
+    def bloques(self, fechas: pd.Series) -> list[tuple[pd.Timestamp, pd.Timestamp, pd.Timestamp]]:
+        """[(fin_entrenamiento_exclusivo, inicio_val, fin_val_exclusivo), ...]."""
+        fechas = pd.to_datetime(fechas)
+        fin = fechas.max().normalize() + pd.offsets.MonthBegin(1)  # 1.er día del mes siguiente
+        salida = []
+        for i in range(self.n_splits, 0, -1):
+            inicio_val = fin - pd.DateOffset(months=i * self.meses_validacion)
+            fin_val = inicio_val + pd.DateOffset(months=self.meses_validacion)
+            salida.append((inicio_val - pd.Timedelta(days=self.embargo_dias), inicio_val, fin_val))
+        if salida[0][0] <= fechas.min():
+            raise ValueError("No queda entrenamiento para el primer pliegue: reduce n_splits")
+        return salida
+
+    def split(self, X, y=None, groups=None) -> Iterator[tuple[np.ndarray, np.ndarray]]:
+        fechas = pd.to_datetime(groups if groups is not None else X["OBSERVATION_DATE"])
+        f = fechas.to_numpy()
+        for fin_train, ini_val, fin_val in self.bloques(fechas):
+            idx_train = np.flatnonzero(f < np.datetime64(fin_train))
+            idx_val = np.flatnonzero((f >= np.datetime64(ini_val)) & (f < np.datetime64(fin_val)))
+            yield idx_train, idx_val
+
+    def get_n_splits(self, X=None, y=None, groups=None) -> int:
+        return self.n_splits
+
+
+# --------------------------------------------------------------------------------------------
+# Métricas por evento (PSet #1)
+# --------------------------------------------------------------------------------------------
+ANTICIPACION_MIN, ANTICIPACION_MAX = 7, 30
+EPISODIO_DIAS = 30          # duración de un episodio de alerta (= horizonte del target)
+N_UMBRALES = 400            # umbrales de la curva PR por evento (espaciados en log del rango)
+_SIN_REPETICION = 1 << 40   # episodio_dias=None: un solo episodio por disco en todo el historial
+
+
+def codigos_disco(ssd) -> np.ndarray:
+    """Entero por disco. Con SSD_KEY categórica usa los códigos (no materializa 100M textos)."""
+    if isinstance(ssd, pd.Series) and isinstance(ssd.dtype, pd.CategoricalDtype):
+        return ssd.cat.codes.to_numpy().astype(np.int64)
+    a = np.asarray(ssd)
+    if np.issubdtype(a.dtype, np.integer):
+        return a.astype(np.int64)
+    return pd.factorize(a)[0].astype(np.int64)
+
+
+def dias_desde_epoca(fecha) -> np.ndarray:
+    """`fecha` puede ser datetime (cualquier resolución) o un entero que ya cuenta días."""
+    f = np.asarray(fecha)
+    if np.issubdtype(f.dtype, np.integer):
+        return f.astype(np.int64)  # ya son días: pd.to_datetime los leería como nanosegundos
+    return np.asarray(pd.to_datetime(f), dtype="datetime64[D]").astype(np.int64)
+
+
+def eventos_anticipables(ssd, dias) -> int:
+    """Discos con al menos una observación entre 7 y 30 días antes de su falla (denominador)."""
+    d = np.asarray(dias, dtype=np.float64)
+    m = (d >= ANTICIPACION_MIN) & (d <= ANTICIPACION_MAX)
+    return int(np.unique(codigos_disco(ssd)[m]).size)
+
+
+@dataclass
+class EventosPreparados:
+    """Filas ordenadas por (disco, fecha), listas para el conteo de episodios.
+
+    Ordenar es lo caro; se hace una vez y se reutiliza para muchos scores (EDA, CV).
+    """
+    orden: np.ndarray       # posiciones originales en orden (disco, fecha)
+    inicio: np.ndarray      # inicio de cada disco dentro del orden (+ n al final)
+    fecha: np.ndarray       # días (int64), ya ordenados
+    dias: np.ndarray        # DAYS_TO_FAILURE (float64, NaN si no falla), ya ordenados
+    eventos: int
+    peso_disco: np.ndarray | None = None  # un peso por disco (en el orden de `inicio`)
+
+
+def preparar_eventos(ssd, fecha, dias, peso=None) -> EventosPreparados:
+    """`peso` (opcional, por fila y constante dentro de cada disco): cuántos discos de la
+    población representa ese disco. Sirve para medir sobre una muestra de discos sanos sin
+    inflar la precisión: un disco sano muestreado al 15 % cuenta como 1/0,15 discos."""
+    codigos = codigos_disco(ssd)
+    f = dias_desde_epoca(fecha)
+    orden = np.lexsort((f, codigos))
+    c = codigos[orden]
+    inicio = np.concatenate([[0], np.flatnonzero(np.diff(c)) + 1, [len(c)]]).astype(np.int64)
+    d = np.asarray(dias, dtype=np.float64)
+    peso_disco = None if peso is None else np.asarray(peso, dtype=np.float64)[orden][inicio[:-1]]
+    return EventosPreparados(orden, inicio, f[orden], d[orden], eventos_anticipables(codigos, dias),
+                             peso_disco)
+
+
+try:
+    from numba import njit, prange
+except ImportError:  # pragma: no cover - numba viene con RAPIDS y en requirements
+    raise ImportError("Las métricas por evento necesitan numba (pip install numba)")
+
+
+@njit(parallel=True, cache=True)
+def _contar_episodios(inicio, fecha, dias, score, umbrales, duracion, a_min, a_max, peso_disco):
+    """Para cada umbral: episodios abiertos, aciertos y alertas tardías (1-6 días), ponderados
+    por el peso de cada disco (1 sin muestreo)."""
+    t_n = len(umbrales)
+    alertas = np.zeros(t_n, np.float64)
+    aciertos = np.zeros(t_n, np.float64)
+    tardias = np.zeros(t_n, np.float64)
+    for k in prange(t_n):
+        tau = umbrales[k]
+        a = 0.0
+        h = 0.0
+        tl = 0.0
+        for d in range(len(inicio) - 1):
+            libre_desde = -(1 << 62)
+            w = peso_disco[d]
+            for i in range(inicio[d], inicio[d + 1]):
+                if score[i] >= tau and fecha[i] >= libre_desde:
+                    a += w
+                    x = dias[i]
+                    if x >= a_min and x <= a_max:
+                        h += w
+                    elif x >= 1 and x < a_min:
+                        tl += w
+                    libre_desde = fecha[i] + duracion
+        alertas[k] = a
+        aciertos[k] = h
+        tardias[k] = tl
+    return alertas, aciertos, tardias
+
+
+def _contar(prep: EventosPreparados, score, umbrales, episodio_dias):
+    s = np.asarray(score, dtype=np.float64)[prep.orden]
+    s = np.where(np.isnan(s), -np.inf, s)  # sin score -> nunca alerta
+    duracion = _SIN_REPETICION if episodio_dias is None else int(episodio_dias)
+    peso = prep.peso_disco if prep.peso_disco is not None else np.ones(len(prep.inicio) - 1)
+    return _contar_episodios(prep.inicio, prep.fecha, prep.dias, s,
+                             np.asarray(umbrales, dtype=np.float64), duracion,
+                             ANTICIPACION_MIN, ANTICIPACION_MAX, peso)
+
+
+def _umbrales(score, n: int) -> np.ndarray:
+    """Umbrales descendentes en los rangos 1, ~e^(1/n·ln N), ..., N del score (log-espaciados).
+
+    La parte útil de la curva (pocas alertas, alta precisión) está en la cola alta del score;
+    espaciar en log del rango da resolución ahí sin evaluar millones de umbrales.
+    """
+    s = np.asarray(score, dtype=np.float64)
+    s = s[np.isfinite(s)]
+    if len(s) == 0:
+        return np.array([])
+    rangos = np.unique(np.round(np.logspace(0, np.log10(len(s)), n)).astype(np.int64) - 1)
+    valores = -np.partition(-s, rangos)[rangos]
+    return np.unique(valores)[::-1]
+
+
+@dataclass
+class CurvaEvento:
+    umbrales: np.ndarray  # descendentes
+    alertas: np.ndarray   # episodios abiertos
+    aciertos: np.ndarray  # episodios que anticipan la falla 7-30 días
+    eventos: int
+    pr_auc: float = field(init=False)
+
+    def __post_init__(self):
+        """PR-AUC con precisión interpolada (estilo PASCAL VOC).
+
+        Con episodios, el recall por evento NO es monótono en tau: al bajar el umbral un
+        episodio puede adelantarse a más de 30 días de la falla y su silencio de 30 días tapar
+        la alerta que sí habría acertado. Por eso no se usa la suma de Riemann de sklearn
+        (daría incrementos negativos): se ordenan los puntos por recall y se usa, en cada
+        nivel, la mejor precisión alcanzable con un recall igual o mayor.
+        """
+        if not self.eventos or len(self.umbrales) == 0:
+            self.pr_auc = float("nan")
+            return
+        r, p = self.recall, self.precision
+        orden = np.argsort(r, kind="stable")
+        r, p = np.concatenate([[0.0], r[orden]]), np.concatenate([[p[orden][0] if len(p) else 0.0], p[orden]])
+        p_interp = np.maximum.accumulate(p[::-1])[::-1]
+        self.pr_auc = float(np.sum(np.diff(r) * p_interp[1:]))
+
+    @property
+    def precision(self):
+        return np.divide(self.aciertos, self.alertas, out=np.zeros(len(self.alertas)), where=self.alertas > 0)
+
+    @property
+    def recall(self):
+        return self.aciertos / self.eventos if self.eventos else np.zeros(len(self.aciertos))
+
+
+def curva_evento(ssd, fecha, dias, score, episodio_dias: int | None = EPISODIO_DIAS,
+                 n_umbrales: int = N_UMBRALES, prep: EventosPreparados | None = None) -> CurvaEvento:
+    """Curva precisión-recall por evento en `n_umbrales` umbrales log-espaciados en rango.
+
+    `prep` (de `preparar_eventos`) evita reordenar cuando se evalúan muchos scores sobre las
+    mismas filas; en ese caso ssd/fecha/dias se ignoran.
+    """
+    prep = prep or preparar_eventos(ssd, fecha, dias)
+    umbrales = _umbrales(score, n_umbrales)
+    alertas, aciertos, _ = _contar(prep, score, umbrales, episodio_dias)
+    return CurvaEvento(umbrales, alertas, aciertos, prep.eventos)
+
+
+def metricas_evento(ssd, fecha, dias, score, tau: float, beta: float = 0.5,
+                    episodio_dias: int | None = EPISODIO_DIAS,
+                    prep: EventosPreparados | None = None) -> dict:
+    """Precisión, recall y F-beta por evento en un umbral tau (operación)."""
+    prep = prep or preparar_eventos(ssd, fecha, dias)
+    a, h, tl = _contar(prep, score, [tau], episodio_dias)
+    n_alertas, tp, eventos = int(round(a[0])), int(round(h[0])), prep.eventos
+    precision = tp / n_alertas if n_alertas else 0.0
+    recall = tp / eventos if eventos else 0.0
+    b2 = beta ** 2
+    f = (1 + b2) * precision * recall / (b2 * precision + recall) if precision + recall else 0.0
+    return {"precision_evento": precision, "recall_evento": recall, "f05_evento": f,
+            "alertas": n_alertas, "aciertos": tp, "eventos": eventos, "alertas_tardias": int(tl[0])}
+
+
+# --------------------------------------------------------------------------------------------
+# Métrica de negocio: costo esperado por 1.000 SSD-mes
+# --------------------------------------------------------------------------------------------
+def ssd_meses(ssd, fecha) -> float:
+    """Exposición observada: días-disco / 30."""
+    clave = codigos_disco(ssd) * 1_000_000 + dias_desde_epoca(fecha)  # días desde 1970 < 1e6
+    return np.unique(clave).size / 30.0
+
+
+def costo_por_1000(alertas, aciertos, eventos, exposicion_ssd_mes: float, k: float):
+    """C_FP = 1 por alerta que no anticipa una falla (incluye tardías); C_FN = k por falla perdida."""
+    alertas, aciertos = np.asarray(alertas, float), np.asarray(aciertos, float)
+    fp, fn = alertas - aciertos, eventos - aciertos
+    return 1000.0 * (fp + k * fn) / exposicion_ssd_mes
+
+
+def barrer_k(curva: CurvaEvento, exposicion_ssd_mes: float, ks=range(1, 51)) -> pd.DataFrame:
+    """Para cada k: umbral de costo mínimo en `curva` (calcularla con predicciones OOF de CV)."""
+    filas = []
+    for k in ks:
+        c = costo_por_1000(curva.alertas, curva.aciertos, curva.eventos, exposicion_ssd_mes, k)
+        sin_modelo = 1000.0 * k * curva.eventos / exposicion_ssd_mes
+        i = int(np.argmin(c))
+        if c[i] >= sin_modelo:  # alertar no conviene: tau = +inf
+            filas.append({"k": k, "tau": np.inf, "costo": sin_modelo, "alertas": 0, "aciertos": 0,
+                          "costo_sin_modelo": sin_modelo})
+        else:
+            filas.append({"k": k, "tau": float(curva.umbrales[i]), "costo": float(c[i]),
+                          "alertas": int(curva.alertas[i]), "aciertos": int(curva.aciertos[i]),
+                          "costo_sin_modelo": sin_modelo})
+    return pd.DataFrame(filas)
+
+
+def costo_con_tau(ssd, fecha, dias, score, taus_por_k: pd.DataFrame) -> pd.DataFrame:
+    """Aplica en otro conjunto (prueba) los tau elegidos en CV; nunca se re-optimizan."""
+    exp = ssd_meses(ssd, fecha)
+    prep = preparar_eventos(ssd, fecha, dias)
+    filas = []
+    for _, fila in taus_por_k.iterrows():
+        m = metricas_evento(ssd, fecha, dias, score, fila["tau"], prep=prep)
+        filas.append({"k": fila["k"], "tau": fila["tau"], **m,
+                      "costo": float(costo_por_1000(m["alertas"], m["aciertos"], m["eventos"], exp, fila["k"])),
+                      "costo_sin_modelo": 1000.0 * fila["k"] * m["eventos"] / exp})
+    return pd.DataFrame(filas)
+
+
+def k_equilibrio(costos_modelo: pd.DataFrame, costos_baseline: pd.DataFrame) -> float | None:
+    """Menor k desde el cual el modelo cuesta menos que el baseline de regla."""
+    m = costos_modelo.merge(costos_baseline, on="k", suffixes=("_modelo", "_base"))
+    mejor = m.loc[m["costo_modelo"] < m["costo_base"], "k"]
+    return float(mejor.min()) if len(mejor) else None
+
+
+# --------------------------------------------------------------------------------------------
+# Presupuesto de alertas (PSet #1: comparar "al mismo presupuesto de alertas")
+# --------------------------------------------------------------------------------------------
+def presupuesto(alertas, exposicion_ssd_mes: float):
+    """Alertas (episodios) por 1.000 SSD-mes."""
+    return 1000.0 * np.asarray(alertas, dtype=float) / exposicion_ssd_mes
+
+
+def umbral_para_presupuesto(ssd, fecha, score, alertas_por_1000: float, exposicion_ssd_mes: float | None = None,
+                            n_umbrales: int = 2 * N_UMBRALES, prep: EventosPreparados | None = None) -> float:
+    """Umbral con el que `score` emite a lo sumo `alertas_por_1000` episodios por 1.000 SSD-mes.
+
+    NO usa etiquetas: contar episodios solo necesita disco, fecha y score. Por eso se puede aplicar
+    a la prueba sin fuga, y el resultado no depende de la escala del score (solo de su orden): un
+    τ elegido en la CV se lleva al modelo final como presupuesto, no como valor de score.
+    """
+    if not np.isfinite(alertas_por_1000) or alertas_por_1000 <= 0:
+        return np.inf
+    exposicion = exposicion_ssd_mes if exposicion_ssd_mes is not None else ssd_meses(ssd, fecha)
+    if prep is None:
+        prep = preparar_eventos(ssd, fecha, np.full(len(np.asarray(score)), np.nan))  # sin etiquetas
+    umbrales = _umbrales(score, n_umbrales)            # descendentes
+    alertas, _, _ = _contar(prep, score, umbrales, EPISODIO_DIAS)
+    tasa = presupuesto(alertas, exposicion)
+    dentro = np.flatnonzero(tasa <= alertas_por_1000 + 1e-9)
+    if len(dentro) == 0:
+        return np.inf
+    return float(umbrales[dentro[np.argmax(tasa[dentro])]])
+
+
+def presupuestos_por_k(curva: CurvaEvento, exposicion_ssd_mes: float, ks=range(1, 51)) -> pd.DataFrame:
+    """Para cada k, el presupuesto de alertas que minimiza el costo en `curva` (predicciones OOF de la CV)."""
+    t = barrer_k(curva, exposicion_ssd_mes, ks)
+    t["alertas_por_1000"] = presupuesto(t["alertas"], exposicion_ssd_mes)
+    return t[["k", "alertas_por_1000", "tau", "costo"]].rename(columns={"tau": "tau_cv", "costo": "costo_cv"})
+
+
+def costo_con_presupuesto(ssd, fecha, dias, score, presupuestos: pd.DataFrame) -> pd.DataFrame:
+    """Aplica en otro conjunto (prueba) los presupuestos elegidos en la CV; el umbral de cada k se
+    busca sin etiquetas y luego se mide el costo con las etiquetas."""
+    exp = ssd_meses(ssd, fecha)
+    prep_sin = preparar_eventos(ssd, fecha, np.full(len(np.asarray(score)), np.nan))
+    prep = preparar_eventos(ssd, fecha, dias)
+    filas = []
+    for _, f in presupuestos.iterrows():
+        tau = umbral_para_presupuesto(None, None, score, f["alertas_por_1000"], exp, prep=prep_sin)
+        m = metricas_evento(None, None, None, score, tau, prep=prep)
+        filas.append({"k": f["k"], "alertas_por_1000_cv": f["alertas_por_1000"], "tau": tau, **m,
+                      "alertas_por_1000": float(presupuesto(m["alertas"], exp)),
+                      "costo": float(costo_por_1000(m["alertas"], m["aciertos"], m["eventos"], exp, f["k"])),
+                      "costo_sin_modelo": 1000.0 * f["k"] * m["eventos"] / exp})
+    return pd.DataFrame(filas)
+
+
+# --------------------------------------------------------------------------------------------
+# Evaluación con CV
+# --------------------------------------------------------------------------------------------
+@dataclass
+class ResultadoCV:
+    cv_pliegues: list[float]
+    train_pliegues: list[float]
+    ap_fila_pliegues: list[float]
+    segundos_pliegues: list[float]
+    oof: pd.DataFrame
+
+    @property
+    def resumen(self) -> dict[str, float]:
+        cv, tr = np.array(self.cv_pliegues), np.array(self.train_pliegues)
+        return {
+            "cv_pr_auc_evento_media": float(np.nanmean(cv)),
+            "cv_pr_auc_evento_std": float(np.nanstd(cv, ddof=1)) if len(cv) > 1 else 0.0,
+            "train_pr_auc_evento": float(np.nanmean(tr)),
+            "brecha_train_cv": float(np.nanmean(tr) - np.nanmean(cv)),
+            "cv_ap_fila_media": float(np.nanmean(self.ap_fila_pliegues)),
+            "segundos_entrenamiento": float(np.sum(self.segundos_pliegues)),
+        }
+
+
+def _score(modelo, X, lote: int = 2_000_000) -> np.ndarray:
+    """Probabilidad de la clase positiva, por bloques.
+
+    Predecir ~10M de filas de una vez sube ~17 GB a la GPU; en un servidor compartido (otros
+    procesos pueden ocupar casi toda la memoria de la GPU) eso agota la memoria. Por bloques, el
+    pico es de ~3 GB y el resultado es idéntico.
+    """
+    if len(X) <= lote:
+        return np.asarray(modelo.predict_proba(X))[:, 1]
+    partes = [np.asarray(modelo.predict_proba(X.iloc[i:i + lote] if hasattr(X, "iloc") else X[i:i + lote]))[:, 1]
+              for i in range(0, len(X), lote)]
+    return np.concatenate(partes)
+
+
+def evaluar_cv(familia_o_modelo, df: pd.DataFrame, columnas: list[str],
+               splitter: EmbargoTimeSeriesSplit | None = None, params: dict | None = None,
+               seed: int = SEMILLA, al_terminar_pliegue: Callable[[int, float], None] | None = None,
+               max_filas_metrica_train: int | None = 5_000_000,
+               frac_sanos_train: float | None = None,
+               cache_prep: dict | None = None) -> tuple[ResultadoCV, object]:
+    """CV propia (no cross_val_score): la métrica por evento necesita SSD_KEY, fecha y DAYS_TO_FAILURE.
+
+    `al_terminar_pliegue(i, valor)` permite a Optuna podar (lanza optuna.TrialPruned).
+    `frac_sanos_train`: si se da, cada pliegue ENTRENA con todos los discos que fallan y esa
+    fracción de los sanos (por disco, determinista). La validación usa siempre todas sus filas,
+    así que la métrica no se sesga; solo cambia la prevalencia vista al entrenar (los scores
+    quedan inflados, pero tau se elige sobre las predicciones de validación, no en 0,5).
+    La métrica de entrenamiento se calcula sobre lo que el modelo vio, o sobre una muestra
+    determinista por disco si supera `max_filas_metrica_train`; en ambos casos los discos sanos
+    se ponderan por la inversa de la fracción muestreada, para que sea comparable con la CV.
+    `cache_prep` (tuning): dict donde se guarda, por pliegue, el paso "prep" ya ajustado y las
+    matrices transformadas. El preprocesamiento no depende de los hiperparámetros del modelo y se
+    ajusta solo con el pliegue de entrenamiento, así que reutilizarlo entre configuraciones da el
+    mismo resultado sin repetir el trabajo.
+    Devuelve también el modelo del último pliegue (el entrenado con más datos).
+    """
+    verificar_sin_fuga(columnas)
+    splitter = splitter or EmbargoTimeSeriesSplit()
+    base = (construir_modelo(familia_o_modelo, params, seed)
+            if isinstance(familia_o_modelo, str) else familia_o_modelo)
+    # Con 100M filas no se copia df[columnas] entero (~170 GB): cada pliegue toma solo sus filas.
+    y = df["TARGET_30D"].to_numpy()
+    meta = df[["SSD_KEY", "OBSERVATION_DATE", "DAYS_TO_FAILURE", "TARGET_30D"]]
+    idx_cols = df.columns.get_indexer(columnas)
+
+    def X_de(pos):
+        return df.iloc[pos, idx_cols]
+
+    cv, tr, ap, seg, oofs, modelo = [], [], [], [], [], None
+    for i, (itr, iva) in enumerate(splitter.split(df, groups=df["OBSERVATION_DATE"])):
+        assert meta["OBSERVATION_DATE"].iloc[itr].max() + pd.Timedelta(days=splitter.embargo_dias) \
+            < meta["OBSERVATION_DATE"].iloc[iva].min(), "Embargo violado"
+        sanos_pliegue = _discos_sanos(meta.iloc[itr])  # para ponderar la métrica de train
+        if frac_sanos_train is not None:
+            itr = itr[muestra_por_disco(meta.iloc[itr], frac_sanos_train, seed)]
+        itr_m = _muestra_discos(meta.iloc[itr], max_filas_metrica_train, seed)
+        pos_m = itr[itr_m] if itr_m is not None else itr
+
+        if cache_prep is not None and isinstance(base, Pipeline) and "prep" in base.named_steps:
+            # repr sin direcciones de memoria (make_column_selector imprime "at 0x...")
+            firma = re.sub(r" at 0x[0-9a-fA-F]+", "", repr(base.named_steps["prep"]))
+            clave = (i, len(itr), len(iva), int(itr[0]) if len(itr) else -1, firma)
+            if clave not in cache_prep:
+                prep_i = clone(base.named_steps["prep"]).fit(X_de(itr), y[itr])
+                cache_prep[clave] = (prep_i, prep_i.transform(X_de(itr)), prep_i.transform(X_de(iva)))
+            prep_i, Xtr_t, Xva_t = cache_prep[clave]
+            estimador = clone(base.named_steps["modelo"])
+            t0 = time.perf_counter()
+            estimador.fit(Xtr_t, y[itr])
+            seg.append(time.perf_counter() - t0)
+            modelo = Pipeline([("prep", prep_i), ("modelo", estimador)])
+            sv = _score(estimador, Xva_t)
+            st = _score(estimador, Xtr_t[itr_m] if itr_m is not None else Xtr_t)
+        else:
+            modelo = clone(base)
+            t0 = time.perf_counter()
+            modelo.fit(X_de(itr), y[itr])
+            seg.append(time.perf_counter() - t0)
+            sv = _score(modelo, X_de(iva))
+            st = _score(modelo, X_de(pos_m))
+
+        dv = meta.iloc[iva]
+        cv.append(curva_evento(dv["SSD_KEY"], dv["OBSERVATION_DATE"], dv["DAYS_TO_FAILURE"], sv).pr_auc)
+        ap.append(average_precision_score(y[iva], sv) if y[iva].any() else np.nan)
+
+        dt = meta.iloc[pos_m]
+        # Los discos sanos de la muestra representan a todos los sanos del pliegue: sin este peso
+        # la precisión de train sale inflada (hay menos falsas alarmas posibles) y la brecha
+        # train−CV exageraría el sobreajuste de cualquier modelo, incluso del dummy.
+        peso = _peso_sanos(dt, sanos_pliegue)
+        prep_t = preparar_eventos(dt["SSD_KEY"], dt["OBSERVATION_DATE"], dt["DAYS_TO_FAILURE"], peso)
+        tr.append(curva_evento(None, None, None, st, prep=prep_t).pr_auc)
+
+        oofs.append(pd.DataFrame({"SSD_KEY": dv["SSD_KEY"].values,  # categórica si viene de la caché
+                                  "OBSERVATION_DATE": dv["OBSERVATION_DATE"].to_numpy(),
+                                  "DAYS_TO_FAILURE": dv["DAYS_TO_FAILURE"].to_numpy(),
+                                  "TARGET_30D": y[iva], "score": sv, "pliegue": i}))
+        if al_terminar_pliegue is not None:
+            al_terminar_pliegue(i, float(np.nanmean(cv)))
+    return ResultadoCV(cv, tr, ap, seg, pd.concat(oofs, ignore_index=True)), modelo
+
+
+def muestra_por_disco(d: pd.DataFrame, frac_sanos: float, seed: int = SEMILLA) -> np.ndarray:
+    """Posiciones a conservar: TODOS los discos con alguna fila positiva + `frac_sanos` del resto.
+
+    Se muestrea por disco (no por fila) para conservar historiales completos, que es lo que
+    usan las features temporales. La elección es determinista: hash del SSD_KEY con la semilla.
+    Solo se aplica al ENTRENAMIENTO; validación y prueba usan siempre todas las filas.
+    """
+    codigos = codigos_disco(d["SSD_KEY"])
+    fallan = np.unique(codigos[d["TARGET_30D"].to_numpy() == 1])
+    es_falla = np.isin(codigos, fallan)
+    h = _hash_disco(d["SSD_KEY"], seed)
+    return np.flatnonzero(es_falla | ((h % 10_000) < frac_sanos * 10_000))
+
+
+def _hash_disco(ssd: pd.Series, seed: int) -> np.ndarray:
+    """Hash por fila que depende solo del texto del SSD_KEY (estable entre cargas y cachés)."""
+    clave = f"{seed:016d}"
+    if isinstance(ssd.dtype, pd.CategoricalDtype):  # un hash por disco, repartido por código
+        hc = pd.util.hash_pandas_object(pd.Series(ssd.cat.categories), index=False, hash_key=clave).to_numpy()
+        return hc[ssd.cat.codes.to_numpy()]
+    return pd.util.hash_pandas_object(pd.Series(np.asarray(ssd)), index=False, hash_key=clave).to_numpy()
+
+
+def _discos_sanos(d: pd.DataFrame) -> int:
+    """Discos sin ninguna fila positiva (mismo criterio que `muestra_por_disco`)."""
+    codigos = codigos_disco(d["SSD_KEY"])
+    fallan = np.unique(codigos[d["TARGET_30D"].to_numpy() == 1])
+    return int(np.unique(codigos).size - fallan.size)
+
+
+def _peso_sanos(muestra: pd.DataFrame, sanos_poblacion: int) -> np.ndarray:
+    """Peso por fila: 1 en discos que fallan; sanos_población / sanos_muestra en los sanos."""
+    codigos = codigos_disco(muestra["SSD_KEY"])
+    es_falla = np.isin(codigos, np.unique(codigos[muestra["TARGET_30D"].to_numpy() == 1]))
+    sanos_muestra = max(int(np.unique(codigos[~es_falla]).size), 1)
+    return np.where(es_falla, 1.0, sanos_poblacion / sanos_muestra)
+
+
+def _muestra_discos(d: pd.DataFrame, max_filas: int | None, seed: int):
+    """Posiciones de una muestra por disco de a lo sumo ~max_filas filas, o None."""
+    if max_filas is None or len(d) <= max_filas:
+        return None
+    return muestra_por_disco(d, max_filas / len(d), seed)
+
+
+# --------------------------------------------------------------------------------------------
+# MLflow
+# --------------------------------------------------------------------------------------------
+NOMBRE_EXPERIMENTO = os.getenv("MLFLOW_EXPERIMENTO", "ssd-failure-mc1")
+NOMBRE_MODELO_REGISTRO = "ssd-failure-modelo"
+
+
+def commit_git() -> str:
+    """SHA de HEAD; "-dirty" si hay cambios de CÓDIGO sin commit.
+
+    Las salidas de los notebooks (.ipynb ejecutados) y lo que generan en docs/ no cuentan: cada
+    notebook los reescribe al correr, y marcarían como "dirty" corridas con el código idéntico.
+    """
+    try:
+        sha = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+        sucio = subprocess.run(["git", "diff", "--quiet", "HEAD", "--", ":/", ":(top,exclude,glob)**/*.ipynb",
+                                ":(top,exclude,glob)**/docs/**"]).returncode != 0
+        return sha + ("-dirty" if sucio else "")
+    except (OSError, subprocess.CalledProcessError):
+        return "desconocido"
+
+
+def configurar_mlflow(experimento: str = NOMBRE_EXPERIMENTO):
+    import mlflow  # noqa: PLC0415
+
+    mlflow.set_tracking_uri(os.getenv("MLFLOW_TRACKING_URI", "http://localhost:5000"))
+    mlflow.set_experiment(experimento)
+    return mlflow
+
+
+def _params_planos(modelo) -> dict[str, str]:
+    est = modelo.named_steps["modelo"] if isinstance(modelo, Pipeline) else modelo
+    salida = {}
+    for k, v in est.get_params(deep=False).items():
+        if isinstance(v, BaseEstimator):
+            for k2, v2 in v.get_params(deep=False).items():
+                salida[f"{k}__{k2}"] = str(v2)[:500]
+        else:
+            salida[k] = str(v)[:500]
+    return salida
+
+
+def registrar_corrida(*, nombre: str, fase: str, familia: str, modelo, seed: int,
+                      metricas: dict[str, float], datos: dict[str, str], X_ejemplo: pd.DataFrame,
+                      params_extra: dict | None = None, tags_extra: dict | None = None,
+                      nested: bool = False, registrar_modelo: bool = True) -> str:
+    """Una corrida con todo lo que pide el PSet #3: params+semilla, datos, métricas, tags, modelo."""
+    import mlflow  # noqa: PLC0415
+    from mlflow.models import infer_signature  # noqa: PLC0415
+
+    if fase not in {"baseline", "candidato", "tuning", "final"}:
+        raise ValueError("fase debe ser baseline, candidato, tuning o final")
+    with mlflow.start_run(run_name=nombre, nested=nested) as run:
+        mlflow.log_params({"semilla": seed, **_params_planos(modelo), **(params_extra or {}), **datos})
+        mlflow.log_metrics({k: v for k, v in metricas.items() if v is not None and np.isfinite(v)})
+        mlflow.set_tags({"fase": fase, "familia": familia, "git_commit": commit_git(),
+                         **(tags_extra or {})})
+        if registrar_modelo:
+            ejemplo = X_ejemplo.head(5)
+            firma = infer_signature(ejemplo, _score(modelo, ejemplo))
+            # code_paths: el modelo lleva src/ consigo (clases propias del pipeline), así
+            # models:/...@champion se carga en cualquier entorno con las mismas dependencias.
+            mlflow.sklearn.log_model(modelo, name="pipeline", signature=firma, input_example=ejemplo,
+                                     serialization_format="cloudpickle",
+                                     code_paths=[os.path.dirname(os.path.abspath(__file__))])
+        return run.info.run_id
+
+
+def exportar_corridas(ruta: str = "../docs/corridas.csv", experimento: str = NOMBRE_EXPERIMENTO) -> pd.DataFrame:
+    import mlflow  # noqa: PLC0415
+
+    corridas = mlflow.search_runs(experiment_names=[experimento], max_results=50_000)
+    corridas.to_csv(ruta, index=False)
+    return corridas
