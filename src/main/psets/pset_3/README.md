@@ -105,6 +105,14 @@ Ejecutar en Jupyter (contenedor `jupyter-gpu`) con **Restart & Run All**; la sal
 | 5 | `notebooks/05_seleccion.ipynb` | Prueba única, costo de negocio, registry `champion`/`challenger`, `docs/corridas.csv` |
 | 6 | `notebooks/06_reproducir_champion.ipynb` | Notebook limpio: carga `models:/ssd-failure-modelo@champion` y reproduce la métrica de prueba registrada |
 
+El notebook 05 se ejecutó dos veces (sus conclusiones explican por qué), así que hay dos corridas `fase=final` por
+rol. Después del 05, este script marca las anteriores con `estado=reemplazada` y vuelve a exportar `docs/corridas.csv`
+(no entrena ni toca la prueba):
+
+```bash
+docker compose exec jupyter-gpu python scripts/marcar_finales_reemplazadas.py
+```
+
 La lógica vive en `src/` y los notebooks la importan:
 
 - `src/datos.py`: extracción, manifiesto, hash, carga y partición con embargo.

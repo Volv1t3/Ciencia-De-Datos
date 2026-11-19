@@ -70,41 +70,67 @@ def _logistica(t):
 ESPACIOS = {"xgboost": _xgboost, "bosque": _bosque, "mlp": _mlp, "logistica": _logistica}
 
 
-def estudio(familia: str, storage: str, seed: int = pl.SEMILLA):
+N_COMPLETAS = 30
+# Protocolo final: 30 configuraciones con la CV COMPLETA por familia. La primera ronda usó poda por
+# mediana y solo 18 (bosque), 15 (MLP) y 19 (XGBoost) llegaron al final. Bosque y MLP se rehicieron
+# desde cero sin poda en estudios nuevos (v2), con el código ya commiteado: sus estudios originales
+# tenían corridas registradas con commit "-dirty". XGBoost conserva su estudio (limpio) y se extendió
+# sin poda hasta tener 30 completas; sus 11 configuraciones podadas siguen registradas.
+ESTUDIO = {"bosque": "pset3-bosque-v2", "mlp": "pset3-mlp-v2"}
+
+
+def nombre_estudio(familia: str) -> str:
+    return ESTUDIO.get(familia, f"pset3-{familia}")
+
+
+def estudio(familia: str, storage: str, seed: int = pl.SEMILLA, podar: bool = False):
+    """Estudio de Optuna (TPE). El pruner no se guarda en el storage: aplica a las configuraciones
+    que se evalúen desde esta llamada. `podar=False`: toda configuración nueva completa la CV."""
     import optuna  # noqa: PLC0415
+    pruner = (optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=0) if podar
+              else optuna.pruners.NopPruner())
     return optuna.create_study(
-        study_name=f"pset3-{familia}", storage=storage, load_if_exists=True, direction="maximize",
-        sampler=optuna.samplers.TPESampler(seed=seed, n_startup_trials=8),
-        pruner=optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=0))
+        study_name=nombre_estudio(familia), storage=storage, load_if_exists=True, direction="maximize",
+        sampler=optuna.samplers.TPESampler(seed=seed, n_startup_trials=8), pruner=pruner)
 
 
-def tunear(ctx: exp.Contexto, familia: str, storage: str, n_trials: int = N_TRIALS) -> "optuna.Study":
-    """Corre (o completa) el estudio de `familia` hasta tener `n_trials` configuraciones terminadas."""
+def _contar(st, estado) -> int:
+    return sum(t.state == estado for t in st.trials)
+
+
+def tunear(ctx: exp.Contexto, familia: str, storage: str, completas: int = N_COMPLETAS,
+           podar: bool = False) -> "optuna.Study":
+    """Corre (o retoma) el estudio de `familia` hasta tener `completas` configuraciones con CV completa."""
     import mlflow  # noqa: PLC0415
     import optuna  # noqa: PLC0415
 
     if familia not in ESPACIOS:
         raise ValueError(f"Sin espacio de búsqueda para {familia}")
-    st = estudio(familia, storage, ctx.seed)
-    terminados = [t for t in st.trials if t.state in (optuna.trial.TrialState.COMPLETE,
-                                                       optuna.trial.TrialState.PRUNED)]
-    faltan = n_trials - len(terminados)
+    st = estudio(familia, storage, ctx.seed, podar)
+    COMPLETA = optuna.trial.TrialState.COMPLETE
     padre = st.user_attrs.get("mlflow_run_padre")
-    with mlflow.start_run(run_id=padre) if padre else mlflow.start_run(run_name=f"tuning_{familia}") as run:
+    nombre_padre = "tuning_" + nombre_estudio(familia).removeprefix("pset3-")
+    with mlflow.start_run(run_id=padre) if padre else mlflow.start_run(run_name=nombre_padre) as run:
         if not padre:
             st.set_user_attr("mlflow_run_padre", run.info.run_id)
             mlflow.set_tags({"fase": "tuning", "familia": familia, "git_commit": pl.commit_git(),
-                             "rol": "padre"})
-            mlflow.log_params({"semilla": ctx.seed, "n_trials": n_trials, "sampler": "TPE",
-                               "pruner": "MedianPruner(n_startup_trials=5)", "frac_sanos_train": ctx.frac_sanos,
-                               "cv": ctx.descripcion_cv, **ctx.meta_datos})
-        if faltan > 0:
+                             "rol": "padre", "estudio": nombre_estudio(familia)})
+            mlflow.log_params({"semilla": ctx.seed, "configuraciones_completas_objetivo": completas,
+                               "sampler": "TPE(n_startup_trials=8)",
+                               "pruner": "MedianPruner(n_startup_trials=5)" if podar else "ninguno",
+                               "frac_sanos_train": ctx.frac_sanos, "cv": ctx.descripcion_cv, **ctx.meta_datos})
+        for _ in range(3):  # tope de rondas: si alguna configuración falla, se reintenta pocas veces
+            faltan = completas - _contar(st, COMPLETA)
+            if faltan <= 0:
+                break
             st.optimize(lambda t: _objetivo(t, ctx, familia), n_trials=faltan, gc_after_trial=True)
         mejor = st.best_trial
         mlflow.log_metrics({"mejor_cv_pr_auc_evento": mejor.value,
-                            "trials_completos": sum(t.state == optuna.trial.TrialState.COMPLETE for t in st.trials),
-                            "trials_podados": sum(t.state == optuna.trial.TrialState.PRUNED for t in st.trials)})
-        mlflow.log_params({f"mejor_{k}": v for k, v in mejor.params.items()})
+                            "trials_completos": _contar(st, COMPLETA),
+                            "trials_podados": _contar(st, optuna.trial.TrialState.PRUNED)})
+        # Tags (no params): el mejor puede cambiar al extender un estudio, y un param no se puede reescribir
+        mlflow.set_tags({f"mejor_{k}": str(v) for k, v in mejor.params.items()}
+                        | {"mejor_trial": str(mejor.number), "configuraciones_completas": str(_contar(st, COMPLETA))})
     return st
 
 

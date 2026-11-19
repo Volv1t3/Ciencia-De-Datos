@@ -336,7 +336,7 @@ class ConSubmuestra(BaseEstimator, ClassifierMixin):
         return self.estimador_.predict(X)
 
 
-def _mlp_skorch(params: dict, seed: int):
+def _mlp(params: dict, seed: int):
     from src.mlp import construir_mlp  # noqa: PLC0415 - importa torch solo para esta familia
     return construir_mlp(params, seed)
 
@@ -416,7 +416,7 @@ def construir_estimador(familia: str, params: dict | None = None, seed: int = SE
             {"device": "cuda", "tree_method": "hist", "random_state": seed, "eval_metric": "aucpr",
              "scale_pos_weight": "balanced", "n_jobs": 16} | params))
     if familia == "mlp":
-        return _mlp_skorch(params, seed)
+        return _mlp(params, seed)
     if familia == "tabpfn":
         from tabpfn import TabPFNClassifier  # noqa: PLC0415
         n_max = params.pop("n_max", 20_000)  # contexto medido: más filas no mejoraron

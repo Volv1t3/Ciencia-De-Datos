@@ -10,7 +10,7 @@ sqlalchemy==2.0.41          # 2.1 rompe MLflow 3.1.x (mismo pin que el servidor)
 alembic==1.16.2
 optuna>=4.3,<5
 torch==2.15.0               # MLP; probado con CUDA 13.2 + NCCL 2.30 en el H200 (ver LD_PRELOAD en docker-compose)
-skorch>=1.1,<2              # envoltorio sklearn para la MLP de PyTorch
+skorch>=1.1,<2              # YA NO SE USA (la MLP tiene su propio bucle, src/mlp.py); se conserva para que la imagen coincida con requirements.lock.txt, el entorno en que corrieron los notebooks
 tabpfn==10.0.0              # modelo fundacional tabular (familia "state of the art"); pesos TabPFN-3.5-Fast
 google-genai==3.3.0         # LLM por prompting (API de Gemini, nivel gratuito; notebook 03)
 snowflake-connector-python[pandas]>=3.12,<4

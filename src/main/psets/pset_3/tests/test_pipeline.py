@@ -288,12 +288,12 @@ def test_tuning_corridas_anidadas_y_retoma(df, tmp_path):
                        oof_dir=tmp_path / "oof", meta_datos={"datos_sha256": "abc"}, variante="R",
                        frac_sanos=0.5)
     storage = f"sqlite:///{(tmp_path / 'optuna.db').as_posix()}"
-    st = tuning.tunear(ctx, "logistica", storage, n_trials=3)
+    st = tuning.tunear(ctx, "logistica", storage, completas=3)
     assert len(st.trials) == 3 and np.isfinite(st.best_value)
     padre = st.user_attrs["mlflow_run_padre"]
     hijas = mlflow.search_runs(filter_string=f"tags.mlflow.parentRunId = '{padre}'")
     assert len(hijas) == 3 and set(hijas["tags.fase"]) == {"tuning"}
-    st2 = tuning.tunear(ctx, "logistica", storage, n_trials=3)   # retoma: no agrega configuraciones
+    st2 = tuning.tunear(ctx, "logistica", storage, completas=3)   # retoma: no agrega configuraciones
     assert len(st2.trials) == 3 and st2.user_attrs["mlflow_run_padre"] == padre
 
 
