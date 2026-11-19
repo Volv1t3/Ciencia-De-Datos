@@ -69,6 +69,24 @@ if [[ "${SOLO_FINALES:-}" == 1 ]]; then
   exit 0
 fi
 
+# RONDA_FINAL=1: espera el tuning sin poda (30 completas) y TabPFN con el commit limpio, y corre
+# 04 → 03 → 05 → 06 → marcado de corridas reemplazadas (docs/plan_evaluacion_final.md)
+if [[ "${RONDA_FINAL:-}" == 1 ]]; then
+  for f in tuning_bosque_v2.log tuning_mlp_v2.log tuning_xgboost_ext.log; do
+    esperar "$f"; exito "$f" || { log "ERROR: $f no terminó bien. Cola detenida."; exit 1; }; log "$f OK"
+  done
+  notebook 04_tuning.ipynb nb04_v2.log
+  esperar familia_tabpfn_v2.log
+  OMITIR=""
+  exito familia_tabpfn_v2.log || { log "aviso: TabPFN falló (ver familia_tabpfn_v2.log)"; OMITIR="tabpfn"; }
+  notebook 03_baseline_candidatos.ipynb nb03_v2.log "PSET3_OMITIR=$OMITIR"
+  notebook 05_seleccion.ipynb nb05_v2.log
+  notebook 06_reproducir_champion.ipynb nb06_v2.log
+  docker compose exec -T jupyter-gpu sh -c "cd /repo/src/main/psets/pset_3 && python scripts/marcar_finales_reemplazadas.py" >> "$ESTADO" 2>&1
+  log "terminada (ronda final): 04, 03, 05, 06 y marcado ejecutados"
+  exit 0
+fi
+
 notebook 04_tuning.ipynb nb04.log
 
 esperar familia_tabpfn.log
