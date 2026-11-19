@@ -48,6 +48,27 @@ Growing error/sector counters and old drives are warning signs. Return one proba
 and 1 for every id you receive, calibrated to that base rate."""
 
 
+# Columnas de la OBT que lee el LLM (las únicas que entran al prompt)
+COLUMNAS_LLM = ["DAYS_SINCE_FIRST_SEEN"] + [f"R_{a}{sufijo}" for a in ATRIBUTOS_LLM for _, sufijo in VENTANAS_LLM]
+
+
+def modelo_pyfunc(cache_dir: str | Path, modelo: str = MODELO_LLM, seed: int = 42):
+    """El LLM como modelo de MLflow (pyfunc): recibe un DataFrame con COLUMNAS_LLM y devuelve la
+    probabilidad de falla. Llama a la API de Gemini (GEMINI_API_KEY) salvo que la respuesta esté en
+    `cache_dir`; así queda registrado con firma y ejemplo de entrada como las demás familias."""
+    import mlflow.pyfunc  # noqa: PLC0415
+
+    class ModeloLLM(mlflow.pyfunc.PythonModel):
+        def __init__(self, cache_dir, modelo, seed):
+            self.cache_dir, self.modelo, self.seed = str(cache_dir), modelo, seed
+
+        def predict(self, context, model_input, params=None):
+            from src import llm as _llm  # noqa: PLC0415 - se resuelve con code_paths al cargar
+            return _llm.predecir(model_input, self.cache_dir, modelo=self.modelo, seed=self.seed).probabilidades
+
+    return ModeloLLM(cache_dir, modelo, seed)
+
+
 def resumen_caso(fila: pd.Series) -> dict:
     """Lo que ve el LLM de un disco-día: solo features (nunca etiquetas ni identificadores)."""
     def num(v):
