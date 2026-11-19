@@ -17,6 +17,8 @@
     "mejora": 0.007179460475056626,
     "mejora_relativa": 0.5963118165959101,
     "mejora_supera_std": false,
+    "mejora_supera_std_mayor": false,
+    "pliegues_que_mejoran": 3.0,
     "train_optimizado": 0.09611614298913694,
     "brecha_optimizado": 0.07689690688789684
   },
@@ -39,6 +41,8 @@
     "mejora": 0.0033778924747664887,
     "mejora_relativa": 0.309053178798569,
     "mejora_supera_std": false,
+    "mejora_supera_std_mayor": false,
+    "pliegues_que_mejoran": 3.0,
     "train_optimizado": 0.15222968903280878,
     "brecha_optimizado": 0.13792198671787853
   },
@@ -63,6 +67,8 @@
     "mejora": 0.009385058606637893,
     "mejora_relativa": 0.9516989379055842,
     "mejora_supera_std": true,
+    "mejora_supera_std_mayor": false,
+    "pliegues_que_mejoran": 4.0,
     "train_optimizado": 0.100575966656123,
     "brecha_optimizado": 0.0813295346331275
   }
