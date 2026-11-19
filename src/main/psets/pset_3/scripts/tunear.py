@@ -6,7 +6,7 @@ Uso (en el contenedor, desde pset_3/):
     docker compose exec -d trabajador-extra sh -c "python -u scripts/tunear.py bosque > /datos/tuning_bosque.log 2>&1"
 
 Variables:
-    N_TRIALS (30) · FRAC_SANOS_TUNING (0.05)
+    N_COMPLETAS (30 configuraciones con CV completa) · FRAC_SANOS_TUNING (0.05) · PODAR (0)
     Solo para pruebas reducidas: PRUEBA_DESDE (AAAA-MM-DD), PRUEBA_PLIEGUES, PRUEBA_MESES_VAL; con
     PRUEBA_DESDE se usa el experimento "pset3-pruebas" y una base de Optuna y OOF aparte.
 El estudio real vive en /datos/optuna/pset3.db: el notebook 04 retoma lo que estos procesos dejen.
@@ -26,7 +26,8 @@ from src import experimentos as exp, pipeline as pl, tuning  # noqa: E402
 
 load_dotenv("../.env")
 DATOS = Path(os.environ.get("DATOS_DIR", "/datos"))
-N_TRIALS = int(os.getenv("N_TRIALS", tuning.N_TRIALS))
+N_COMPLETAS = int(os.getenv("N_COMPLETAS", tuning.N_COMPLETAS))
+PODAR = os.getenv("PODAR", "0") == "1"
 FRAC = float(os.getenv("FRAC_SANOS_TUNING", "0.05"))
 PRUEBA = os.getenv("PRUEBA_DESDE")
 
@@ -42,8 +43,8 @@ else:
     pl.configurar_mlflow()
     ctx = exp.preparar(DATOS, DATOS / "oof" / "04", frac_sanos=FRAC)
     storage = tuning.storage_por_defecto(DATOS)
-print(f"GPU {exp.gpu_visible()} · {len(ctx.train):,} filas · frac_sanos {FRAC} · {N_TRIALS} trials · "
+print(f"GPU {exp.gpu_visible()} · {len(ctx.train):,} filas · frac_sanos {FRAC} · {N_COMPLETAS} completas · poda {PODAR} · "
       f"{'PRUEBA' if PRUEBA else 'real'} · commit {pl.commit_git()}", flush=True)
 for familia in sys.argv[1:]:
-    st = tuning.tunear(ctx, familia, storage, n_trials=N_TRIALS)
+    st = tuning.tunear(ctx, familia, storage, completas=N_COMPLETAS, podar=PODAR)
     print(f"{familia}: mejor CV {st.best_value:.4f} en el trial {st.best_trial.number} · {st.best_params}", flush=True)
