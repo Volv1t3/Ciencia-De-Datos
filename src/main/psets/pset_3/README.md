@@ -124,5 +124,20 @@ pset_3/
 ├── notebooks/           01_eda … 05_seleccion, 06_reproducir_champion
 ├── src/                 datos.py  pipeline.py
 ├── tests/               test_pipeline.py
-└── docs/                corridas.csv   figuras/   PSet3_memo_Arellano_Guaman_Perla_Teran.pdf
+└── docs/                corridas.csv   figuras/   memo/   PSet3_memo_Arellano_Guaman_Perla_Teran.pdf
 ```
+
+## Documento técnico
+
+El memo (`docs/PSet3_memo_Arellano_Guaman_Perla_Teran.pdf`) se genera desde `docs/memo/memo.md` con
+pandoc + xelatex (MiKTeX o TeX Live). Todos sus números salen de las salidas guardadas de los notebooks y de los
+archivos de `docs/`. `docs/memo/encabezado.tex` define el formato y `docs/memo/cortes.lua` evita que los
+identificadores largos desborden las tablas.
+
+```bash
+bash docs/memo/construir.sh                      # pandoc + xelatex (por defecto)
+MOTOR=weasyprint bash docs/memo/construir.sh     # alternativa sin LaTeX (pip install weasyprint)
+```
+
+La captura de la UI de MLflow del anexo C se lee de `docs/figuras/mlflow_comparacion.png`. Si ese archivo no
+existe, el PDF muestra un recuadro "pendiente" en su lugar.
