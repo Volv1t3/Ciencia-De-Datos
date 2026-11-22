@@ -11,6 +11,7 @@ import pandas as pd
 
 RAIZ = Path(__file__).resolve().parents[1]
 c = pd.read_csv(RAIZ / "docs" / "corridas.csv", low_memory=False)
+c = c[c.get("tags.estado", pd.Series(index=c.index, dtype=object)) != "reemplazada"]  # solo corridas vigentes
 nombre = c["tags.mlflow.runName"].astype(str)
 
 
