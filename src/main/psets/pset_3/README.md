@@ -101,9 +101,31 @@ Ejecutar en Jupyter (contenedor `jupyter-gpu`) con **Restart & Run All**; la sal
 | 1 | `notebooks/01_eda.ipynb` | Snapshot, EDA, hallazgos, elección de variante (R/N/RN) y del atributo para la regla |
 | 2 | `notebooks/02_features.ipynb` | Features derivadas, evidencia y prueba de no-fuga |
 | 3 | `notebooks/03_baseline_candidatos.ipynb` | 3 baselines + 5 familias + LLM (`fase=baseline`/`candidato`) |
-| 4 | `notebooks/04_tuning.ipynb` | Optuna, 30 trials × 3 modelos como corridas anidadas (`fase=tuning`) |
+| 4 | `notebooks/04_tuning.ipynb` | Optuna (TPE): 30 configuraciones **con CV completa y sin poda** por cada una de las 3 familias, como corridas anidadas (`fase=tuning`) |
 | 5 | `notebooks/05_seleccion.ipynb` | Prueba única, costo de negocio, registry `champion`/`challenger`, `docs/corridas.csv` |
 | 6 | `notebooks/06_reproducir_champion.ipynb` | Notebook limpio: carga `models:/ssd-failure-modelo@champion` y reproduce la métrica de prueba registrada |
+
+**Ronda final.** Una primera ronda de tuning usó poda por mediana, y algunas corridas quedaron con commit `-dirty`.
+Por eso se rehízo el tuning: 30 configuraciones completas por familia, sin poda y con el commit limpio. Después se
+re-ejecutaron los notebooks 04 → 03 → 05 → 06. Las reglas de esa evaluación se fijaron por escrito antes de correrla, en
+[`docs/plan_evaluacion_final.md`](docs/plan_evaluacion_final.md). Todo se lanza con:
+
+```bash
+RONDA_FINAL=1 nohup bash scripts/cola_final.sh > /dev/null 2>&1 < /dev/null &   # en el host; estado en $DATOS/cola_estado.log
+```
+
+La prueba se evaluó tres veces en total; las limitaciones del notebook 05 lo explican. Al final, este script marca las
+corridas que ya no valen con `estado=reemplazada`:
+- los estudios originales del bosque y la MLP;
+- las repeticiones;
+- las finales anteriores.
+
+Luego vuelve a exportar `docs/corridas.csv`. No entrena ni toca la prueba:
+
+```bash
+docker compose exec jupyter-gpu python scripts/marcar_finales_reemplazadas.py
+python scripts/tabla_resultados.py   # docs/tabla_resultados.{csv,md}: tabla del memo (solo corridas vigentes)
+```
 
 La lógica vive en `src/` y los notebooks la importan:
 
