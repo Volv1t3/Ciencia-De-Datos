@@ -139,5 +139,5 @@ bash docs/memo/construir.sh                      # pandoc + xelatex (por defecto
 MOTOR=weasyprint bash docs/memo/construir.sh     # alternativa sin LaTeX (pip install weasyprint)
 ```
 
-La captura de la UI de MLflow del anexo C se lee de `docs/figuras/mlflow_comparacion.png`. Si ese archivo no
-existe, el PDF muestra un recuadro "pendiente" en su lugar.
+Las capturas de la UI de MLflow (sección 4 y anexo C) son `docs/figuras/05_mlflow_comparacion.png` y
+`docs/figuras/05_mlflow_comparacion_completa.png`. Si falta alguna figura, el PDF muestra un recuadro "pendiente" en su lugar.

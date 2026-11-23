@@ -19,10 +19,10 @@ function Table(el)
   if not FORMAT:match("latex") then return nil end
   local filas = 0
   for _, cuerpo in ipairs(el.bodies) do filas = filas + #cuerpo.body end
-  if filas > 12 then return nil end
+  if filas > 8 then return nil end  -- las largas pueden partirse (longtable repite el encabezado)
   return { pandoc.RawBlock("latex", string.format("\\needspace{%d\\baselineskip}", 2 * filas + 3)), el }
 end
 function Header(el)
   if not FORMAT:match("latex") then return nil end
-  return { pandoc.RawBlock("latex", "\\needspace{6\\baselineskip}"), el }
+  return { pandoc.RawBlock("latex", "\\needspace{3\\baselineskip}"), el }
 end

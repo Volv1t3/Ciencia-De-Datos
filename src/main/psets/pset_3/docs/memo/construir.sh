@@ -8,17 +8,17 @@ MOTOR="${MOTOR:-xelatex}"
 WEASYPRINT="${WEASYPRINT:-weasyprint}"
 SALIDA=PSet3_memo_Arellano_Guaman_Perla_Teran.pdf
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
-AVISO="**Pendiente:** guardar la captura de la vista *Compare* del experimento \`ssd-failure-mc1\` como \`docs/figuras/mlflow_comparacion.png\` y volver a ejecutar \`docs/memo/construir.sh\`."
-
-# Si todavía no existe la captura de la UI de MLflow, se deja un recuadro "pendiente" en su lugar.
-FALTA=0
-[[ -f figuras/mlflow_comparacion.png ]] || { FALTA=1; echo "AVISO: falta docs/figuras/mlflow_comparacion.png; el anexo C queda como pendiente" >&2; }
-awk -v falta="$FALTA" -v motor="$MOTOR" -v aviso="$AVISO" '
+# Si falta alguna figura (por ejemplo, una captura de MLflow), se deja un recuadro "pendiente" en su lugar.
+awk -v motor="$MOTOR" '
   motor == "xelatex" && /^# Anexos/ { print "\\newpage"; print "" }
-  falta == 1 && /figuras\/mlflow_comparacion.png/ {
-    if (motor == "xelatex") { print "\\begin{center}\\fbox{\\parbox{0.9\\linewidth}{\\centering\\vspace{2em}\\textbf{Pendiente:} guardar la captura de la vista \\emph{Compare} del experimento \\texttt{ssd-failure-mc1} como \\texttt{docs/figuras/mlflow\\_comparacion.png} y volver a ejecutar \\texttt{docs/memo/construir.sh}.\\vspace{2em}}}\\end{center}" }
-    else { print "::: pendiente"; print aviso; print ":::" }
-    next }
+  /^!\[.*\]\(figuras\/[^)]*\)/ {
+    ruta = $0; sub(/^.*\]\(/, "", ruta); sub(/\).*$/, "", ruta)
+    if (system("test -f \"" ruta "\"") != 0) {
+      print "AVISO: falta docs/" ruta "; queda un recuadro pendiente" > "/dev/stderr"
+      if (motor == "xelatex") { r = ruta; gsub(/_/, "\\_", r)
+        print "\\begin{center}\\fbox{\\parbox{0.9\\linewidth}{\\centering\\vspace{2em}\\textbf{Pendiente:} falta \\texttt{docs/" r "}.\\vspace{2em}}}\\end{center}" }
+      else { print "::: pendiente"; print "**Pendiente:** falta `docs/" ruta "`."; print ":::" }
+      next } }
   { print }' memo/memo.md > "$TMP/memo.md"
 
 if [[ "$MOTOR" == "xelatex" ]]; then
