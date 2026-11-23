@@ -1,0 +1,28 @@
+% Ajustes de LaTeX para el memo (pandoc → xelatex).
+\usepackage{float}
+\usepackage{needspace}
+\floatplacement{figure}{H}
+\usepackage{etoolbox}
+\AtBeginEnvironment{longtable}{\footnotesize}
+\usepackage{xcolor}
+\definecolor{azul}{HTML}{1A3A6B}
+\usepackage{titlesec}
+\titleformat{\section}{\large\bfseries\color{azul}}{}{0pt}{}[\vspace{-0.6ex}{\color{azul!30}\titlerule}]
+\titleformat{\subsection}{\normalsize\bfseries\color{azul}}{}{0pt}{}
+\titlespacing*{\section}{0pt}{1.6ex}{0.8ex}
+\titlespacing*{\subsection}{0pt}{1.2ex}{0.5ex}
+\setlength{\parskip}{0.45ex}
+\setlength{\parindent}{0pt}
+\usepackage{caption}
+\captionsetup{font=small,labelformat=empty,skip=2pt}
+\usepackage{enumitem}
+\setlist{itemsep=0.2ex,topsep=0.4ex}
+\renewcommand{\arraystretch}{1.15}
+\usepackage{titling}
+\setlength{\droptitle}{-3em}
+\pretitle{\begin{center}\LARGE\bfseries}
+\posttitle{\par\end{center}}
+% Liberation Sans no trae "∈": se toma de DejaVu Sans.
+\usepackage{newunicodechar}
+\newfontfamily\simbolos{DejaVu Sans}[Scale=0.92]
+\newunicodechar{∈}{{\simbolos ∈}}

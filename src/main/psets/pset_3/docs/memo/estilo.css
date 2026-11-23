@@ -1,0 +1,27 @@
+/* Estilo de impresión del memo técnico (pandoc → HTML → WeasyPrint). */
+@page {
+  size: A4;
+  margin: 1.6cm 1.7cm 1.7cm 1.7cm;
+  @bottom-center { content: counter(page); font-size: 8pt; color: #666; }
+}
+html { font-family: "DejaVu Sans", "Liberation Sans", Arial, sans-serif; font-size: 9pt; line-height: 1.32; color: #111; }
+body { margin: 0; max-width: none; }
+header#title-block-header { text-align: center; margin-bottom: 8pt; border-bottom: 1px solid #999; padding-bottom: 6pt; }
+h1.title { font-size: 16pt; margin: 0 0 2pt 0; }
+p.subtitle { font-size: 11pt; margin: 0 0 4pt 0; color: #333; }
+p.author, p.date { margin: 0; font-size: 9pt; color: #444; }
+h1 { font-size: 12.5pt; margin: 12pt 0 4pt 0; color: #1a3a6b; border-bottom: 1px solid #c8d2e0; padding-bottom: 1pt; }
+h2 { font-size: 10.5pt; margin: 10pt 0 3pt 0; color: #1a3a6b; }
+h1#anexos { page-break-before: always; }
+p { margin: 3pt 0 4pt 0; text-align: justify; }
+ul, ol { margin: 3pt 0 4pt 0; padding-left: 16pt; }
+li { margin: 1pt 0; }
+code { font-family: "DejaVu Sans Mono", monospace; font-size: 0.86em; background: #f2f4f7; padding: 0 2px; border-radius: 2px; }
+table { border-collapse: collapse; width: 100%; margin: 5pt 0 7pt 0; font-size: 7.9pt; line-height: 1.25; page-break-inside: avoid; }
+th, td { border: 1px solid #c9ced6; padding: 2.5pt 4pt; vertical-align: top; text-align: left; }
+th { background: #e8edf4; font-weight: bold; }
+td[style*="right"], th[style*="right"] { text-align: right; }
+figure { margin: 6pt 0 8pt 0; text-align: center; page-break-inside: avoid; }
+figure img { max-width: 100%; }
+figcaption { font-size: 8pt; color: #444; margin-top: 2pt; }
+.pendiente { border: 2px dashed #b55; padding: 28pt 12pt; text-align: center; color: #922; margin: 8pt 0; }
